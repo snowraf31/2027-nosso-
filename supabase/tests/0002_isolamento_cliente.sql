@@ -48,14 +48,7 @@ $$;
 do $$
 declare
   v jsonb;
-  v_slug_seed text;
 begin
-  -- slug de um restaurante que NÃO é de teste (vem do seed), lido antes de virar anon
-  select slug into v_slug_seed from public.restaurants
-   where id::text not like 'aaaaaaaa-%' and id::text not like 'bbbbbbbb-%' order by slug limit 1;
-  if v_slug_seed is null then
-    raise exception 'PREPARO DO TESTE: o seed não criou nenhum restaurante além dos de teste (esperado ao menos um)';
-  end if;
   perform pg_temp.entrar_anon();
 
   -- A com token de A: só categorias e itens de A
@@ -93,8 +86,12 @@ begin
   if public.get_guest_menu('restaurante-a-teste', 'token-mesa-b1') is not null then
     raise exception 'VAZAMENTO: get_guest_menu com slug de A e token da mesa de B devolveu cardápio';
   end if;
-  if public.get_guest_menu(v_slug_seed, 'token-mesa-a1') is not null then
-    raise exception 'VAZAMENTO: get_guest_menu com slug do restaurante do seed e token da mesa de A devolveu cardápio';
+  -- slug de um terceiro restaurante (C: existe, mas não tem mesa) com token de mesa de A
+  if public.get_guest_menu('restaurante-c-teste', 'token-mesa-a1') is not null then
+    raise exception 'VAZAMENTO: get_guest_menu com slug de C e token da mesa de A devolveu cardápio';
+  end if;
+  if public.get_guest_menu('restaurante-c-teste', 'token-mesa-b1') is not null then
+    raise exception 'VAZAMENTO: get_guest_menu com slug de C e token da mesa de B devolveu cardápio';
   end if;
 
   -- Mesa inativa: null (mesmo com o slug certo)

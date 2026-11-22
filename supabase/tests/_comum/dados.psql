@@ -12,15 +12,18 @@
 -- Dados de teste (tudo é desfeito pelo rollback no fim do arquivo)
 --
 -- UUIDs fixos e legíveis: <restaurante>-<tipo>-0000-0000-<número>
---   restaurante: aaaaaaaa = A, bbbbbbbb = B, cccccccc = usuário sem restaurante
+--   restaurante: aaaaaaaa = A, bbbbbbbb = B, cccccccc = C (restaurante sem mesa e sem staff,
+--   e também o usuário logado que não pertence a restaurante nenhum)
 --   tipo: 0001 restaurante, 0002 usuário, 0003 mesa, 0004 categoria, 0005 item,
 --         0006 grupo de adicionais, 0007 opção, 0008 pedido, 0009 item do pedido
 -- Assim, qualquer linha de B que apareça numa consulta de A é fácil de achar.
 --
--- Cada restaurante tem 2 mesas (a 2 é inativa), 2 categorias, 2 itens, 2 grupos,
+-- Os restaurantes A e B têm, cada um, 2 mesas (a 2 é inativa), 2 categorias, 2 itens, 2 grupos,
 -- 4 opções, 2 vínculos item-grupo, 2 pedidos e 2 itens de pedido, mais um dono
--- e um usuário da cozinha. Os restaurantes entram ANTES dos usuários para o
--- gatilho bootstrap_first_owner (0006) não promover ninguém por acidente.
+-- e um usuário da cozinha. O restaurante C é só uma linha em restaurants (sem mesa, sem
+-- cardápio, sem staff): serve de "restaurante de fora" que não depende do seed. Os
+-- restaurantes entram ANTES dos usuários para o gatilho bootstrap_first_owner (0006)
+-- não promover ninguém por acidente.
 -- ---------------------------------------------------------------------
 
 -- Restaurante A -------------------------------------------------------
@@ -101,6 +104,10 @@ insert into public.order_items (id, order_id, menu_item_id, name_snapshot, unit_
   ('bbbbbbbb-0009-0000-0000-000000000001', 'bbbbbbbb-0008-0000-0000-000000000001', 'bbbbbbbb-0005-0000-0000-000000000001', 'Café B',  575, 1, '[{"name":"Leite de aveia B","price_cents":75}]'),
   ('bbbbbbbb-0009-0000-0000-000000000002', 'bbbbbbbb-0008-0000-0000-000000000002', 'bbbbbbbb-0005-0000-0000-000000000002', 'Prato B', 1500, 1, '[]');
 
+-- Restaurante C: existe, mas não tem mesa nem staff ----------------------
+insert into public.restaurants (id, slug, name, order_seq) values
+  ('cccccccc-0001-0000-0000-000000000001', 'restaurante-c-teste', 'Restaurante C (teste de isolamento)', 902);
+
 -- Usuários (e-mails fictícios). O gatilho do 0006 não deve criar vínculo nenhum.
 insert into auth.users (id, email) values
   ('aaaaaaaa-0002-0000-0000-000000000001', 'dono-a@exemplo.test'),
@@ -169,6 +176,15 @@ language sql immutable as $$
     when 'order_items' then '(select o.restaurant_id from public.orders o where o.id = x.order_id)'
     else 'x.restaurant_id'
   end
+$$;
+
+-- Colunas de uma tabela do public como "nome tipo, nome tipo": serve para o atacante dos testes
+-- criar uma tabela temporária de mesmo nome e mesmo formato (sem NOT NULL nem default).
+create function pg_temp.colunas(p_tabela text) returns text
+language sql stable as $$
+  select string_agg(format('%I %s', a.attname, format_type(a.atttypid, a.atttypmod)), ', ' order by a.attnum)
+    from pg_attribute a
+   where a.attrelid = ('public.' || p_tabela)::regclass and a.attnum > 0 and not a.attisdropped
 $$;
 
 -- Entra como usuário logado (papel "authenticated"), igual ao Supabase: o JWT diz quem é.
@@ -247,4 +263,58 @@ begin
                       p_o_que_vazou, sqlerrm, p_sql;
   end;
   raise exception 'FALHA DE SEGURANÇA: % (o banco aceitou o comando). Comando: %', p_o_que_vazou, p_sql;
+end $$;
+
+
+-- ---------------------------------------------------------------------
+-- Lacunas conhecidas que dependem de uma migration (ainda não existe; este PR não cria migration).
+-- Enquanto a migration não entra, o teste AVISA (raise warning); depois dela, o mesmo teste
+-- passa a DERRUBAR o CI sozinho. Qualquer estado fora do estado legado exato derruba o CI.
+-- ---------------------------------------------------------------------
+
+-- TRUNCATE, REFERENCES e TRIGGER: o 0002 só revoga INSERT, UPDATE e DELETE de authenticated.
+-- Verdadeiro só no estado legado exato: as 10 tabelas, os 3 privilégios e nada além.
+-- A migration (revoke truncate, references, trigger on all tables in schema public from authenticated)
+-- faz esta função devolver falso.
+create function pg_temp.truncate_legado() returns boolean
+language plpgsql stable as $$
+declare
+  v_legado text[] := array(select tabela from pg_temp.tabelas());
+  v_total int;
+  v_conhecidos int;
+begin
+  select count(*), count(*) filter (where c.relname = any (v_legado))
+    into v_total, v_conhecidos
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    cross join unnest(array['truncate', 'references', 'trigger']) p
+   where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
+     and has_table_privilege('authenticated', c.oid, p);
+  return v_total = 3 * cardinality(v_legado) and v_conhecidos = v_total;
+end $$;
+
+-- search_path de função security definer: "blindado" quando termina em pg_temp (ou é vazio).
+-- Sem isso, uma tabela temporária criada pelo chamador (com o mesmo nome de uma tabela do
+-- public) vem ANTES do public na busca e engana a função, que roda com o poder do dono.
+create function pg_temp.search_path_blindado(p_func regprocedure) returns boolean
+language sql stable as $$
+  select coalesce((
+    select s.v in ('', '""', '''''')
+           or lower(btrim((string_to_array(s.v, ','))[cardinality(string_to_array(s.v, ','))], ' "''')) = 'pg_temp'
+      from (select substr(c, length('search_path=') + 1) as v
+              from pg_proc p, unnest(p.proconfig) c
+             where p.oid = p_func and c like 'search_path=%') s
+  ), false)
+$$;
+
+-- Chamada quando uma tabela temporária forjada enganou uma função security definer.
+-- Função com search_path blindado e mesmo assim enganada: falha de segurança nova, derruba o CI.
+-- Função ainda sem a blindagem (estado legado): aviso, até a migration existir.
+create function pg_temp.vazamento_de_funcao(p_func regprocedure, p_o_que_vazou text) returns void
+language plpgsql as $$
+begin
+  if pg_temp.search_path_blindado(p_func) then
+    raise exception 'VAZAMENTO: % (mesmo com o search_path de % terminando em pg_temp)', p_o_que_vazou, p_func;
+  end if;
+  raise warning 'LACUNA CONHECIDA (ainda sem migration): % Corrigir com migration: alter function % set search_path = ..., pg_temp (pg_temp por último).', p_o_que_vazou, p_func;
 end $$;
