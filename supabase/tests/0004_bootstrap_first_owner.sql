@@ -26,10 +26,15 @@ create function pg_temp.vinculos(p_usuario uuid) returns int
 language sql as $$ select count(*)::int from public.staff where user_id = p_usuario $$;
 
 -- 1. nenhum restaurante --------------------------------------------------
-insert into auth.users (id, email) values
-  ('dddddddd-0002-0000-0000-000000000001', 'sem-restaurante-nenhum@exemplo.test');
 do $$
 begin
+  begin
+    insert into auth.users (id, email) values
+      ('dddddddd-0002-0000-0000-000000000001', 'sem-restaurante-nenhum@exemplo.test');
+  exception when others then
+    -- sem a guarda "exatamente 1 restaurante" o gatilho tentaria vincular o usuário a restaurante nenhum
+    raise exception 'GATILHO: com 0 restaurantes, criar usuário falhou (%): o bootstrap_first_owner perdeu a guarda de "exatamente 1 restaurante"', sqlerrm;
+  end;
   if (select count(*) from public.staff) <> 0 then
     raise exception 'GATILHO: com 0 restaurantes, criar usuário gerou vínculo de staff (%)', (select count(*) from public.staff);
   end if;
@@ -50,8 +55,10 @@ end $$;
 
 -- 3. um restaurante, staff vazio ------------------------------------------
 delete from public.restaurants where id = 'dddddddd-0001-0000-0000-000000000002';
+-- dois INSERTs separados: o cenário "primeiro, depois o segundo" fica explícito
 insert into auth.users (id, email) values
-  ('dddddddd-0002-0000-0000-000000000003', 'primeiro-dono@exemplo.test'),
+  ('dddddddd-0002-0000-0000-000000000003', 'primeiro-dono@exemplo.test');
+insert into auth.users (id, email) values
   ('dddddddd-0002-0000-0000-000000000004', 'estranho-depois@exemplo.test');
 do $$
 declare
