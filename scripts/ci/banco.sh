@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Aplica as migrations e os seeds do Tabletop num Postgres limpo e roda os testes do banco.
+# O CI usa o Postgres 17 (igual ao Supabase real); o 16 também serve para rodar local.
 # Uso: PGHOST=... PGPORT=... PGUSER=... PGPASSWORD=... bash scripts/ci/banco.sh
 # Cria e apaga o banco "tabletop_ci" (ou $BANCO_TESTE). Nunca aponte para o banco do restaurante.
 set -euo pipefail
