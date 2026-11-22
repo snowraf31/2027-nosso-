@@ -163,6 +163,19 @@ language sql immutable as $$
   select case p_tabela when 'staff' then 'restaurant_id' when 'item_modifier_groups' then 'item_id' else 'id' end
 $$;
 
+-- Expressão SQL (alias x) com o restaurante dono da linha, mesmo nas tabelas filhas.
+-- Serve para fotografar "tudo que não é do restaurante X", inclusive linhas criadas com id aleatório.
+create function pg_temp.dono_sql(p_tabela text) returns text
+language sql immutable as $$
+  select case p_tabela
+    when 'restaurants' then 'x.id'
+    when 'modifier_options' then '(select g.restaurant_id from public.modifier_groups g where g.id = x.group_id)'
+    when 'item_modifier_groups' then '(select i.restaurant_id from public.menu_items i where i.id = x.item_id)'
+    when 'order_items' then '(select o.restaurant_id from public.orders o where o.id = x.order_id)'
+    else 'x.restaurant_id'
+  end
+$$;
+
 -- Entra como usuário logado (papel "authenticated"), igual ao Supabase: o JWT diz quem é.
 create function pg_temp.entrar_como(p_usuario uuid) returns void
 language plpgsql as $$
@@ -197,8 +210,8 @@ declare
   v_tudo text := '';
 begin
   for t in select tabela from pg_temp.tabelas() order by tabela loop
-    execute format('select coalesce(string_agg(x::text, ''|'' order by x::text), '''') from public.%I x where %I::text not like %L',
-                   t.tabela, pg_temp.chave(t.tabela), p_prefixo || '-%') into v_parte;
+    execute format($q$select coalesce(string_agg(x::text, '|' order by x::text), '') from public.%I x where coalesce((%s)::text, '') not like %L$q$,
+                   t.tabela, pg_temp.dono_sql(t.tabela), p_prefixo || '-%') into v_parte;
     v_tudo := v_tudo || t.tabela || '=' || v_parte || E'\n';
   end loop;
   return md5(v_tudo);
