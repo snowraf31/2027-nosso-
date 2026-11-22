@@ -1,14 +1,16 @@
 -- =====================================================================
 -- Tabletop · 0010 · Endurecer privilégios e funções security definer
--- Fecha as 3 lacunas que os testes de isolamento (supabase/tests) só avisavam:
---   1. authenticated ainda tinha TRUNCATE, REFERENCES e TRIGGER nas tabelas;
+-- Fecha as lacunas que os testes de isolamento (supabase/tests) só avisavam:
+--   1. authenticated ainda tinha TRUNCATE, REFERENCES e TRIGGER (e, no Postgres 17,
+--      MAINTAIN) nas tabelas, e o padrão das tabelas futuras seguia aberto;
 --   2. as 5 funções security definer não blindavam o search_path com pg_temp;
 --   3. place_order procurava a idempotency_key no banco inteiro.
+-- Mais: ninguém de fora cria objeto em schema do search_path das funções definer.
 -- Só acréscimos: nenhuma migration anterior foi editada.
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
--- 1. TRUNCATE, REFERENCES e TRIGGER
+-- 1. Privilégios que ignoram a RLS: TRUNCATE, REFERENCES, TRIGGER (e MAINTAIN no PG 17)
 -- A 0002 só revogou INSERT, UPDATE e DELETE de authenticated, mas o privilégio
 -- padrão do Supabase dá "all" nas tabelas. TRUNCATE ignora a RLS: quem conecta
 -- direto no SQL esvaziaria a tabela de TODOS os restaurantes. TRIGGER roda código
@@ -18,12 +20,65 @@
 -- ---------------------------------------------------------------------
 revoke truncate, references, trigger on all tables in schema public from authenticated, anon;
 
--- Tabelas futuras: o default privilege do papel que roda as migrations (postgres)
--- voltaria a dar "all" a cada tabela nova. Isto tira os três privilégios do padrão.
--- Vale só para o papel que roda esta migration; ver a nota no relatório sobre
--- tabelas criadas por outro papel (por exemplo supabase_admin). A guarda do catálogo
--- (supabase/tests/0003) segue como rede de segurança para qualquer tabela nova.
+-- Postgres 17: o "all" passou a incluir MAINTAIN, que deixa rodar LOCK TABLE em qualquer modo
+-- (um "access exclusive" em orders trava os pedidos de TODOS os restaurantes), VACUUM FULL,
+-- CLUSTER e REINDEX, também sem passar pela RLS. No Postgres 16 a palavra maintain nem existe
+-- (erro de sintaxe), por isso o comando vai em SQL dinâmico e só roda a partir da versão 17.
+do $$
+begin
+  if current_setting('server_version_num')::int >= 170000 then
+    execute 'revoke maintain on all tables in schema public from authenticated, anon';
+    execute 'alter default privileges in schema public revoke maintain on tables from authenticated, anon';
+  end if;
+end $$;
+
+-- Objetos FUTUROS (padrão do papel que roda as migrations, no Supabase o postgres): sem isto, cada
+-- tabela nova nasceria com "all" para anon e authenticated.
+--   tabelas:    anon não recebe nada; authenticated só mantém o SELECT (a RLS filtra por restaurante).
+--               Escrita de staff é só pelas colunas da cozinha (grant por coluna, como na 0002) ou pela API.
+--   sequências: nenhum dos dois (setval/nextval pelo visitante bagunçaria numeração compartilhada).
+-- Funções ficam de fora de propósito: o PUBLIC já recebe EXECUTE por padrão em toda função nova, então
+-- revogar só de anon/authenticated não mudaria nada, e revogar do PUBLIC no padrão global também
+-- tiraria o EXECUTE das funções que as extensões instalam. Para funções a rede de segurança é a guarda
+-- do catálogo (supabase/tests/0003, item 4): função security definer nova executável por anon ou
+-- authenticated derruba o CI.
 alter default privileges in schema public revoke truncate, references, trigger on tables from authenticated, anon;
+alter default privileges in schema public revoke insert, update, delete on tables from authenticated;
+alter default privileges in schema public revoke all on tables from anon;
+alter default privileges in schema public revoke all on sequences from authenticated, anon;
+revoke all on all sequences in schema public from authenticated, anon;
+
+-- Limite: "alter default privileges" só mexe nos padrões do papel que roda esta migration. No Supabase
+-- real, supabase_admin também tem padrões que dão "all" a anon e authenticated no schema public, e o
+-- papel postgres não consegue alterá-los. Tabela criada por supabase_admin (ou por outro papel) nasce
+-- aberta: só a guarda do catálogo (supabase/tests/0003, item 3b) segura esse caso.
+-- Um REVOKE sobre privilégio concedido por OUTRO papel só emite WARNING e não revoga nada. Por isso a
+-- verificação no fim desta migration (bloco "0010: conferência") derruba a migration se qualquer
+-- privilégio proibido continuar valendo: melhor falhar alto do que "passar" sem ter fechado a lacuna.
+
+-- Quem de fora não cria objetos nos schemas do search_path das funções definer. Com pg_temp por último
+-- (item 2) a tabela temporária não engana mais, mas um objeto criado em public ou extensions (por
+-- exemplo uma função com o mesmo nome e tipos exatos de uma chamada) ainda seria achado antes do
+-- objeto de verdade e rodaria com o poder do dono. Projetos antigos podem ter herdado CREATE para o
+-- PUBLIC no schema public.
+revoke create on schema public from public, anon, authenticated;
+-- Os dois a seguir podem não caber ao papel que roda a migration (no Supabase o schema extensions
+-- e o banco pertencem a outro papel): então só avisam, e a guarda de supabase/tests/0003 (item 3d)
+-- cobre o que o CI consegue ver.
+do $$
+begin
+  if to_regnamespace('extensions') is not null then
+    execute 'revoke create on schema extensions from public, anon, authenticated';
+  end if;
+exception when others then
+  raise warning '0010: não foi possível revogar CREATE no schema extensions (%). Confira à mão com has_schema_privilege.', sqlerrm;
+end $$;
+do $$
+begin
+  execute format('revoke create on database %I from public, anon, authenticated', current_database());
+exception when others then
+  raise warning '0010: não foi possível revogar CREATE no banco (%). Confira à mão com has_database_privilege.', sqlerrm;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- 2. search_path das funções security definer, com pg_temp por último
@@ -198,3 +253,44 @@ end $$;
 
 -- Os grants não mudam: create or replace preserva os da 0001 (service_role) e da 0005
 -- (anon e authenticated); public continua sem execute. Os testes conferem.
+
+-- ---------------------------------------------------------------------
+-- 0010: conferência
+-- Um REVOKE de privilégio dado por outro papel só emite WARNING e não revoga nada. Aqui a migration
+-- confere o resultado e falha (a transação inteira é desfeita) se alguma lacuna continuar aberta.
+-- ---------------------------------------------------------------------
+do $$
+declare
+  v_lista text;
+  v_extra text[] := case when current_setting('server_version_num')::int >= 170000
+                         then array['maintain'] else '{}'::text[] end;
+begin
+  -- tabelas existentes: anon e authenticated sem os privilégios que ignoram a RLS
+  select string_agg(c.relname || ' (' || r || ': ' || p || ')', ', ' order by c.relname, r, p) into v_lista
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    cross join unnest(array['anon', 'authenticated']) r
+    cross join unnest(array['truncate', 'references', 'trigger'] || v_extra) p
+   where n.nspname = 'public' and c.relkind in ('r', 'p')
+     and has_table_privilege(r, c.oid, p);
+  if v_lista is not null then
+    raise exception '0010: privilégio que ignora a RLS continua valendo (o REVOKE não pegou; rode a migration com o papel dono das tabelas): %', v_lista;
+  end if;
+
+  -- padrões futuros do papel que roda a migration, no schema public
+  select string_agg(case d.defaclobjtype when 'r' then 'tabelas' else 'sequências' end || ': ' ||
+                    g.rolname || ' ' || a.privilege_type, ', ' order by d.defaclobjtype, g.rolname, a.privilege_type)
+    into v_lista
+    from pg_default_acl d
+    cross join lateral aclexplode(d.defaclacl) a
+    join pg_roles g on g.oid = a.grantee
+   where d.defaclrole = (select oid from pg_roles where rolname = current_user)
+     and d.defaclnamespace = 'public'::regnamespace
+     and g.rolname in ('anon', 'authenticated')
+     and (   (d.defaclobjtype = 'r' and (g.rolname = 'anon'
+              or a.privilege_type in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')))
+          or d.defaclobjtype = 'S');
+  if v_lista is not null then
+    raise exception '0010: o padrão de privilégios das tabelas/sequências futuras continua aberto: %', v_lista;
+  end if;
+end $$;
