@@ -1,0 +1,3 @@
+﻿insumo;data;quantidade;unidade_compra;valor_total_pago;fornecedor;observacao
+(exemplo) Coca-Cola lata 350 ml;18/11/2026;4;caixa;168,00;Distribuidora Central;NF 1234
+(exemplo) Queijo muçarela;18/11/2026;5;kg;199,50;Laticínios Serra;

@@ -1,0 +1,6 @@
+﻿item_do_cardapio;tipo;insumo;quantidade;unidade_uso
+(exemplo) X-Burger;item;Pão de hambúrguer;1;un
+(exemplo) X-Burger;item;Carne moída;150;g
+(exemplo) X-Burger;item;Queijo muçarela;30;g
+(exemplo) Bacon extra;adicional;Bacon fatiado;40;g
+(exemplo) Coca-Cola lata 350 ml;item;Coca-Cola lata 350 ml;1;un

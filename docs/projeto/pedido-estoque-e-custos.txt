@@ -1,0 +1,97 @@
+<contexto>
+Projeto na pasta "Sistema de pedidos por QR": um sistema de pedidos por QR code para restaurantes, em piloto num restaurante de teste. O que já existe e funciona:
+- Aba Cozinha, 100% funcional: três colunas (Novo pedido, Em preparo, Pronto pra servir), um som para cada etapa e o tempo que cada pedido passa em cada coluna.
+- Aba do gerente (manager): controles financeiros, resumo de pedidos, pedidos por método, tempo médio de preparo, faturamento diário, semanal e mensal com bruto e líquido, e uma parte inicial de estoque.
+O piloto está em uso. A cozinha não pode parar nem mudar de comportamento por causa deste trabalho.
+</contexto>
+
+<objetivo>
+Construir, dentro deste projeto, o controle de estoque e de custos do restaurante:
+- saber o que existe no estoque e quanto custa cada item;
+- a cada pedido, dar baixa automática no que saiu do estoque;
+- avisar o gerente quando um item precisa de reposição, logo depois dos pedidos que o fizeram baixar;
+- mostrar custo, margem e lucro com cálculos corretos e fáceis de conferir.
+O gerente precisa confiar nos números: cada valor mostrado tem de poder ser conferido até o pedido ou a compra que o gerou.
+</objetivo>
+
+<primeiro_leia_o_projeto>
+Antes de escrever código, leia o projeto e descubra:
+- as tecnologias, a estrutura de pastas, como rodar, como testar e como é publicado;
+- como pedidos, itens do cardápio, adicionais e formas de pagamento são guardados;
+- o ciclo de vida do pedido: os estados, quem muda cada um e se existe cancelamento;
+- como a aba do gerente calcula hoje o faturamento bruto e o líquido, e o que já existe de estoque. Aproveite e amplie o que existe; não crie um segundo estoque em paralelo;
+- se os dados são separados por restaurante. Se forem, siga o mesmo padrão em tudo o que criar.
+Siga os padrões que encontrar: componentes, estilo visual, nomes, organização e forma de acessar os dados.
+</primeiro_leia_o_projeto>
+
+<o_que_construir>
+1. Insumos. Cadastro com nome, categoria, unidade de compra, unidade de uso e a conversão entre elas (por exemplo, caixa com 12 garrafas; saco de 5 kg usado em gramas), estoque mínimo, estoque ideal e fornecedor opcional. Inclua importação por planilha (CSV), para cadastrar em lote.
+
+2. Ficha técnica. Para cada item do cardápio e cada adicional, os insumos que consome e as quantidades. Item de revenda, como bebida, consome uma unidade do próprio insumo. Item sem ficha fica marcado como "ficha pendente": o pedido dele não dá baixa e entra numa lista de pendências do gerente.
+
+3. Entradas. Registro de compras com insumo, quantidade, valor pago, data e fornecedor. Cada entrada atualiza o estoque e o custo médio.
+
+4. Baixa por pedido. Automática, pela ficha técnica do item e dos adicionais.
+   - A baixa acontece quando o pedido é registrado.
+   - Pedido cancelado antes de entrar em preparo devolve tudo ao estoque sozinho.
+   - Pedido cancelado depois disso: o gerente escolhe entre devolver ao estoque ou lançar como perda.
+   - O mesmo pedido nunca dá baixa duas vezes, mesmo que mude de estado várias vezes.
+   - Dois pedidos ao mesmo tempo não podem corromper o saldo.
+   Se o ciclo de vida que você encontrar no código pedir outra regra, adote a que fizer sentido e me diga qual e por quê.
+
+5. Ajustes. Contagem de inventário (o gerente informa o que contou e o sistema lança a diferença) e registro de perdas e desperdício, com motivo.
+
+6. Reposição. Quando um insumo chega ao estoque mínimo ou abaixo dele, o gerente vê o aviso logo depois do pedido que causou a baixa. Inclua uma lista de compras com a quantidade sugerida para voltar ao estoque ideal. O aviso se resolve quando a compra é registrada. Nenhum som ou aviso novo na aba Cozinha.
+
+7. Custos e resultado.
+   - Por item do cardápio: custo atual, margem e percentual de custo sobre o preço de venda.
+   - Por período (dia, semana e mês): custo dos produtos vendidos, lucro bruto, perdas e os itens mais e menos rentáveis.
+   Esses indicadores entram na área financeira do gerente como informação nova, ao lado do que já existe.
+
+8. Extrato por insumo. Todas as movimentações, com data, tipo, quantidade, custo e ligação com o pedido ou a compra de origem.
+</o_que_construir>
+
+<regras_de_calculo>
+- O estoque é um livro de movimentações: entrada, saída por pedido, estorno, ajuste e perda. O saldo é sempre a soma das movimentações; ninguém edita o saldo direto.
+- Dinheiro em centavos inteiros, ou no tipo decimal que o projeto já usa; quantidades na unidade base (grama, mililitro ou unidade). Nada de ponto flutuante para dinheiro. Arredondamento só na hora de exibir.
+- Custo do insumo: custo médio ponderado, recalculado a cada entrada.
+- Custo do pedido: gravado no momento da baixa, com o custo médio daquele momento. Mudar depois a ficha técnica ou o preço de compra não altera o histórico.
+- Use as definições de faturamento bruto e líquido que o projeto já tem, sem mudá-las.
+- Custo dos produtos vendidos no período: soma dos custos gravados nas baixas dos pedidos do período, menos os estornos.
+- Mostre ao lado de cada indicador novo a fórmula usada, em linguagem simples.
+- Estoque negativo é permitido, porque a venda aconteceu. Ele aparece destacado para o gerente, como sinal de contagem ou ficha errada.
+- Todas as fórmulas ficam num único lugar do código, em funções sem efeitos colaterais, com testes automáticos para: conversão de unidades, custo médio, baixa com adicionais, cancelamento e estorno, pedido repetido, estoque negativo e arredondamento.
+</regras_de_calculo>
+
+<limites>
+- Aba Cozinha: não altere comportamento, sons, tempos nem aparência. Se a baixa de estoque falhar por qualquer motivo, o pedido segue normalmente para a cozinha; a falha fica registrada e aparece para o gerente.
+- Os números que a aba do gerente já mostra continuam iguais.
+- Banco de dados: só acréscimos (tabelas e colunas novas). Não apague nem renomeie nada que existe. Desenvolva e teste num ambiente de desenvolvimento. Antes de aplicar qualquer mudança de estrutura no banco que o restaurante usa, mostre-me a mudança e espere o meu ok.
+- Trabalhe numa branch nova, com commits pequenos. Não publique em produção sem eu pedir.
+- Dados de exemplo só no ambiente de desenvolvimento, nunca no banco do restaurante.
+- Fora do escopo agora (liste como próximos passos, sem construir): previsão de consumo e de compras, pedido automático a fornecedor, tirar item do cardápio quando faltar insumo e notas fiscais.
+</limites>
+
+<como_trabalhar>
+Trabalhe com autonomia. Dentro destas regras, decida os detalhes e registre cada decisão com o motivo. Pare só em dois casos: o ok do banco em uso, e qualquer mudança que alteraria a aba Cozinha ou os números que o gerente já vê.
+</como_trabalhar>
+
+<verificacao>
+Antes de entregar:
+- rode os testes que já existem e os novos;
+- com o sistema rodando em desenvolvimento, faça o caminho completo: cadastre insumos e uma ficha técnica, registre uma compra, faça um pedido pelo fluxo real, confira a baixa, o custo gravado e o aviso de reposição, cancele um pedido e confira o estorno;
+- confira que a aba Cozinha se comporta como antes: colunas, sons e tempos;
+- confira à mão um período de exemplo: custo e lucro batem com a soma das movimentações.
+Relate o que verificou, com a evidência. O que não deu para verificar, diga que não foi verificado.
+</verificacao>
+
+<entrega>
+Na resposta final:
+- o que foi construído, em poucas linhas;
+- as decisões que você tomou e por quê;
+- como o gerente usa, num passo a passo curto;
+- o que foi verificado;
+- as mudanças de banco que esperam o meu ok;
+- o que eu preciso fornecer: lista de insumos, fichas técnicas, contagem inicial do estoque e compras. Entregue os modelos de planilha (CSV) prontos para eu preencher;
+- os próximos passos sugeridos.
+</entrega>

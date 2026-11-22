@@ -1,0 +1,4 @@
+﻿nome;categoria;unidade_compra;unidade_uso;uso_por_unidade_compra;estoque_minimo;estoque_ideal;fornecedor
+(exemplo) Coca-Cola lata 350 ml;Bebidas;caixa;un;12;24;72;Distribuidora Central
+(exemplo) Farinha de trigo;Secos;saco;g;5000;5000;15000;
+(exemplo) Queijo muçarela;Laticínios;kg;g;1000;2000;6000;Laticínios Serra
