@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Aplica as migrations e os seeds do Tabletop num Postgres limpo e roda os testes do banco.
+# O CI usa o Postgres 17 (igual ao Supabase real); o 16 também serve para rodar local.
 # Uso: PGHOST=... PGPORT=... PGUSER=... PGPASSWORD=... bash scripts/ci/banco.sh
 # Cria e apaga o banco "tabletop_ci" (ou $BANCO_TESTE). Nunca aponte para o banco do restaurante.
 set -euo pipefail
@@ -32,9 +33,12 @@ done
 
 shopt -s nullglob
 testes=(supabase/tests/*.sql)
+# Com set -u, o bash 3.2 (macOS) acusa "unbound variable" ao expandir um array vazio:
+# o laço só roda quando há testes.
 if [ ${#testes[@]} -eq 0 ]; then
   echo "Nenhum teste em supabase/tests/ (só migrations e seeds foram conferidos)."
+else
+  for f in "${testes[@]}"; do rodar "$f"; done
 fi
-for f in "${testes[@]}"; do rodar "$f"; done
 
 echo "Banco: ok (${#testes[@]} arquivo(s) de teste)."

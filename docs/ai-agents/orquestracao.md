@@ -102,7 +102,7 @@ Commits pequenos, mensagem em português. As linhas `Co-Authored-By` do Claude f
   - `mudancas`: descobre o que mudou no PR;
   - `politica`: sempre roda;
   - `app`: instalação, typecheck, lint, testes e build, só quando o app mudou;
-  - `banco`: aplica as migrations e os seeds num Postgres 16 limpo e roda `supabase/tests/*.sql`, só quando `supabase/` mudou;
+  - `banco`: aplica as migrations e os seeds num Postgres 17 limpo (a versão do Supabase real; o 16 também serve para rodar local) e roda `supabase/tests/*.sql`, só quando `supabase/` mudou;
   - `ci-ok`: o único check obrigatório; passa só se os outros passaram ou foram pulados por não terem mudança. Em rascunho ele aparece como pulado, o que não conta como verde: vale a rodada da ponta atual do PR.
 - Mudança no próprio workflow ou em `scripts/ci/` roda tudo.
 
