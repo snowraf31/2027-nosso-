@@ -243,6 +243,9 @@ begin
       perform pg_temp.exige_negado(v_comando, p_quem || ' conseguiu inserir linha (restaurante ' || upper(left(v_letra, 1)) || ')');
     end loop;
 
+    -- DELETE: a regra é no nível do GRANT (authenticated não tem DELETE em tabela nenhuma). Por isso
+    -- um DELETE aceito que atingiu 0 linhas só porque a RLS filtrou também derruba o teste, de propósito:
+    -- um grant de DELETE já é um erro, mesmo com a RLS segurando.
     for t in select tabela from pg_temp.tabelas() loop
       perform pg_temp.exige_negado(
         format('delete from public.%I where %I::text like %L', t.tabela, pg_temp.chave(t.tabela), v_letra || '-%'),
@@ -256,5 +259,48 @@ end $$;
 call pg_temp.checar_negados(pg_temp.id('a', 2, 1), 'aaaaaaaa', 'bbbbbbbb', 'o dono do restaurante A');
 call pg_temp.checar_negados(pg_temp.id('a', 2, 2), 'aaaaaaaa', 'bbbbbbbb', 'a cozinha do restaurante A');
 call pg_temp.checar_negados(pg_temp.id('b', 2, 1), 'bbbbbbbb', 'aaaaaaaa', 'o dono do restaurante B');
+
+-- ---------------------------------------------------------------------
+-- b) TRUNCATE: ignora a RLS e esvaziaria a tabela de TODOS os restaurantes
+-- ---------------------------------------------------------------------
+-- O 0002 só revoga INSERT, UPDATE e DELETE de authenticated, então TRUNCATE (e REFERENCES e
+-- TRIGGER) continua liberado nas 10 tabelas. Cada tentativa roda num sub-bloco que é desfeito
+-- à força (P0777), para o teste não apagar nada de verdade. LACUNA CONHECIDA, sem migration ainda
+-- (revoke truncate, references, trigger on all tables in schema public from authenticated):
+-- no estado legado exato só avisa; com a migration aplicada, ou em qualquer outro estado, derruba o CI.
+create procedure pg_temp.checar_truncate(p_usuario uuid, p_quem text)
+language plpgsql as $$
+declare
+  t record;
+  v_truncou text := '';
+begin
+  set local client_min_messages = warning;   -- sem o aviso "truncate cascades to table ..."
+  perform pg_temp.entrar_como(p_usuario);
+  for t in select tabela from pg_temp.tabelas() order by tabela loop
+    begin
+      execute format('truncate public.%I cascade', t.tabela);   -- cascade: as tabelas filhas seguram o truncate simples
+      raise exception using errcode = 'P0777', message = 'desfazer o truncate de teste';
+    exception
+      when insufficient_privilege then null;                      -- barrado: é o esperado
+      when sqlstate 'P0777' then v_truncou := v_truncou || t.tabela || ' ';   -- passou, e o bloco desfez
+    end;
+  end loop;
+  perform pg_temp.voltar_dono();
+
+  if v_truncou <> '' then
+    if pg_temp.truncate_legado() then
+      raise warning 'LACUNA CONHECIDA (ainda sem migration): % consegue dar TRUNCATE (que ignora a RLS e esvazia a tabela de todos os restaurantes) em: %. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated.', p_quem, btrim(v_truncou);
+    else
+      raise exception 'FALHA DE SEGURANÇA: % consegue dar TRUNCATE (ignora a RLS e esvazia a tabela de todos os restaurantes) em: %', p_quem, btrim(v_truncou);
+    end if;
+  end if;
+  -- o truncate de teste foi desfeito: os dados continuam lá
+  if (select count(*) from public.orders where id::text like 'aaaaaaaa-%') <> 2 then
+    raise exception 'PREPARO DO TESTE: o TRUNCATE de teste não foi desfeito';
+  end if;
+end $$;
+
+call pg_temp.checar_truncate(pg_temp.id('a', 2, 1), 'o dono do restaurante A');
+call pg_temp.checar_truncate(pg_temp.id('a', 2, 2), 'a cozinha do restaurante A');
 
 rollback;
