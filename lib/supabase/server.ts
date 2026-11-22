@@ -1,6 +1,4 @@
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
-
-type CookieToSet = { name: string; value: string; options: CookieOptions };
+import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
 /** Client for logged-in staff in server components. Respects Row Level Security. */
@@ -14,7 +12,7 @@ export async function createClient() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet: CookieToSet[]) {
+        setAll(cookiesToSet) {
           try {
             cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options));
           } catch {
