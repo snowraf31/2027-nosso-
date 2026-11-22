@@ -8,7 +8,9 @@
 --      escreve nas 3 colunas da cozinha; view, view materializada e tabela externa legíveis
 --      por authenticated não podem furar a RLS; só as funções security definer conhecidas
 --      (por assinatura) são executáveis por anon e por authenticated; tabela do Realtime
---      tem RLS. Objeto novo sem RLS, ou com grant aberto demais, derruba o CI aqui.
+--      tem RLS; toda tabela está na lista dos testes (pg_temp.tabelas()); toda política de
+--      RLS filtra por is_staff. Objeto novo sem RLS, com grant aberto demais ou com política
+--      frouxa derruba o CI aqui.
 --
 -- LACUNA CONHECIDA (não é falha deste teste, é aviso): o 0002_security.sql só revoga
 -- INSERT, UPDATE e DELETE de authenticated; ele continua com TRUNCATE (que ignora a RLS e
@@ -83,11 +85,8 @@ end $$;
 do $$
 declare
   v_lista text;
-  v_legado text[] := array['restaurants', 'staff', 'tables', 'menu_categories', 'menu_items',
-                           'modifier_groups', 'modifier_options', 'item_modifier_groups',
-                           'orders', 'order_items'];
-  v_total int;
-  v_conhecidos int;
+  v_catalogo text[] := array(select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                              where n.nspname = 'public' and c.relkind in ('r', 'p'));
 begin
   -- 1. Toda tabela do public tem RLS ligada
   select string_agg(c.relname, ', ' order by c.relname) into v_lista
@@ -131,16 +130,15 @@ begin
 
   -- 3b. authenticated: TRUNCATE, REFERENCES e TRIGGER ignoram a RLS (TRUNCATE esvazia a tabela
   --     de todos os restaurantes; um TRIGGER roda em cima das escritas de qualquer um deles).
-  select string_agg(c.relname || ' (' || p || ')', ', ' order by c.relname, p),
-         count(*), count(*) filter (where c.relname = any (v_legado))
-    into v_lista, v_total, v_conhecidos
+  select string_agg(c.relname || ' (' || p || ')', ', ' order by c.relname, p)
+    into v_lista
     from pg_class c
     join pg_namespace n on n.oid = c.relnamespace
     cross join unnest(array['truncate', 'references', 'trigger']) p
    where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
      and has_table_privilege('authenticated', c.oid, p);
   if v_lista is not null then
-    if v_total = 3 * cardinality(v_legado) and v_conhecidos = v_total then
+    if pg_temp.truncate_legado() then
       raise warning 'LACUNA CONHECIDA (ainda sem migration): o papel authenticated (staff) tem TRUNCATE, REFERENCES e TRIGGER nas 10 tabelas, e TRUNCATE ignora a RLS. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated.';
     else
       raise exception 'O papel authenticated (staff) tem TRUNCATE, REFERENCES ou TRIGGER em: %. Esses privilégios ignoram a RLS (TRUNCATE esvazia a tabela de todos os restaurantes). Faça revoke truncate, references, trigger ... from authenticated.', v_lista;
@@ -194,13 +192,35 @@ begin
     raise exception 'Tabela publicada no Realtime sem RLS: %', v_lista;
   end if;
 
-  -- 6. Aviso (não derruba o CI): tabela nova ainda sem teste de isolamento dedicado
-  select string_agg(c.relname, ', ' order by c.relname) into v_lista
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'public' and c.relkind in ('r', 'p')
-     and c.relname not in (select tabela from pg_temp.tabelas());
+  -- 6. Toda tabela do public tem teste de isolamento: está em pg_temp.tabelas() (e nos dados de
+  --    _comum/dados.psql). Tabela nova fora da lista ficaria sem nenhuma checagem de vazamento.
+  select string_agg(t, ', ' order by t) into v_lista
+    from unnest(v_catalogo) t where t not in (select tabela from pg_temp.tabelas());
   if v_lista is not null then
-    raise warning 'Tabela(s) nova(s) no schema public sem teste de isolamento dedicado: %. Acrescente em pg_temp.tabelas() e nos dados de _comum/dados.psql (valem para os testes 0001 a 0003).', v_lista;
+    raise exception 'Tabela(s) nova(s) no schema public sem teste de isolamento: %. Acrescente em pg_temp.tabelas(), pg_temp.chave() e pg_temp.dono_sql() e os dados de exemplo em _comum/dados.psql (valem para os testes 0001 a 0003).', v_lista;
+  end if;
+  -- ...e o contrário: a lista do teste não pode citar tabela que não existe mais
+  select string_agg(tabela, ', ' order by tabela) into v_lista
+    from pg_temp.tabelas() where tabela <> all (v_catalogo);
+  if v_lista is not null then
+    raise exception 'pg_temp.tabelas() (em _comum/dados.psql) cita tabela que não existe no public: %', v_lista;
+  end if;
+
+  -- 7. Política de RLS frouxa. Com RLS ligada, uma política "using (true)" (ou sem relação com
+  --    o restaurante) libera tudo para todos os restaurantes. Toda política permissiva do public
+  --    tem de checar is_staff(...) (ou auth.uid(), caso de staff_read_own) tanto na leitura
+  --    (using) quanto na escrita (with check); INSERT sem with check também reprova.
+  select string_agg(p.tablename || '.' || p.policyname || ' (' || p.cmd || ')', ', ' order by p.tablename, p.policyname)
+    into v_lista
+    from pg_policies p
+   where p.schemaname = 'public' and p.permissive = 'PERMISSIVE'
+     and (   (p.cmd in ('SELECT', 'UPDATE', 'DELETE', 'ALL')
+              and coalesce(p.qual, '') !~ 'is_staff\(|auth\.uid\(\)')
+          or (p.cmd in ('UPDATE', 'ALL') and p.with_check is not null
+              and p.with_check !~ 'is_staff\(|auth\.uid\(\)')
+          or (p.cmd = 'INSERT' and coalesce(p.with_check, '') !~ 'is_staff\(|auth\.uid\(\)'));
+  if v_lista is not null then
+    raise exception 'Política de RLS que não filtra por restaurante (precisa chamar is_staff(...) em using e em with check): %. Padrão: 0002_security.sql.', v_lista;
   end if;
 end $$;
 
