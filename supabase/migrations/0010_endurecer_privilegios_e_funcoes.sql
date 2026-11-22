@@ -63,8 +63,10 @@ revoke all on all sequences in schema public from authenticated, anon;
 -- PUBLIC no schema public.
 revoke create on schema public from public, anon, authenticated;
 -- Os dois a seguir podem não caber ao papel que roda a migration (no Supabase o schema extensions
--- e o banco pertencem a outro papel): então só avisam, e a guarda de supabase/tests/0003 (item 3d)
--- cobre o que o CI consegue ver.
+-- e o banco pertencem a outro papel): então o REVOKE só avisa. Quem decide é a conferência no fim
+-- desta migration, que olha o resultado (has_schema_privilege e has_database_privilege) e falha se
+-- anon ou authenticated ainda puder criar objeto em public, em extensions ou no banco. A guarda de
+-- supabase/tests/0003 (item 3d) repete a conferência no banco do CI.
 do $$
 begin
   if to_regnamespace('extensions') is not null then
@@ -292,5 +294,21 @@ begin
           or d.defaclobjtype = 'S');
   if v_lista is not null then
     raise exception '0010: o padrão de privilégios das tabelas/sequências futuras continua aberto: %', v_lista;
+  end if;
+
+  -- CREATE nos schemas do search_path das funções definer e no banco: has_*_privilege já inclui o que
+  -- vem do PUBLIC. O REVOKE acima só avisa quando o privilégio foi dado por outro papel; aqui falha alto.
+  select string_agg(alvo || ' (' || r || ')', ', ' order by alvo, r) into v_lista
+    from unnest(array['anon', 'authenticated']) r
+    cross join lateral (
+      select 'schema ' || n.nspname as alvo
+        from pg_namespace n
+       where n.nspname in ('public', 'extensions') and has_schema_privilege(r, n.oid, 'create')
+      union all
+      select 'banco ' || current_database()
+       where has_database_privilege(r, current_database(), 'create')
+    ) x;
+  if v_lista is not null then
+    raise exception '0010: quem é de fora ainda pode criar objetos em: % (o REVOKE de CREATE não pegou; rode com o papel dono do schema/banco)', v_lista;
   end if;
 end $$;
