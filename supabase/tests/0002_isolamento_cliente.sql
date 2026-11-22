@@ -360,7 +360,7 @@ end $$;
 --   iii) mesma chave na mesma mesa: devolve o mesmo pedido (a idempotência continua valendo)
 --   iv)  mesma chave em restaurantes diferentes: dois pedidos distintos, um em cada restaurante
 -- A corrida (duas chamadas ao mesmo tempo com a mesma chave) não cabe numa transação só e
--- fica coberta pelo cadeado da função (pg_advisory_xact_lock); ver comentário na migration 0010.
+-- é testada à parte, com duas conexões, em 0007_idempotencia_corrida.sql (cadeado da função).
 
 -- Chama place_order (1 item, balcão) e devolve o resultado, o SQLSTATE e a mensagem de erro.
 -- Em caso de erro o bloco desfaz tudo o que a função fez até ali.
@@ -537,6 +537,37 @@ begin
     raise exception 'VAZAMENTO: place_order com mesa inexistente ou inativa deveria dar TABLE_NOT_FOUND antes de olhar a chave e deu: % (%) / % (%)',
                     r.res, r.erro, r2.res, r2.erro;
   end if;
+
+  -- ...e vale também para a PRÓPRIA mesa do pedido: com um pedido de chave 'chave-a3-propria' já gravado
+  -- na mesa A3, se a mesa é desativada (ou o QR é trocado) o reenvio da chave pelo token dela não
+  -- devolve o pedido: place_order valida a mesa primeiro e responde TABLE_NOT_FOUND.
+  perform pg_temp.entrar_anon();
+  select * into r from pg_temp.pedir('token-mesa-a3', pg_temp.id('a', 5, 2), 'chave-a3-propria');
+  perform pg_temp.voltar_dono();
+  if r.erro is not null then
+    raise exception 'preparo: o pedido da mesa A3 com a chave própria deveria funcionar e deu erro: %', r.erro;
+  end if;
+  update public.tables set active = false where id = pg_temp.id('a', 3, 3);
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-mesa-a3', pg_temp.id('a', 5, 2), 'chave-a3-propria');
+  perform pg_temp.voltar_dono();
+  if r.res is not null or r.erro is distinct from 'TABLE_NOT_FOUND' then
+    raise exception 'VAZAMENTO: a mesa A3 desativada reenviou a chave de um pedido dela e place_order não respondeu TABLE_NOT_FOUND (a mesa tem de ser validada antes da chave): % (%)',
+                    r.res, r.erro;
+  end if;
+  update public.tables set active = true, qr_token = 'token-mesa-a3-novo' where id = pg_temp.id('a', 3, 3);
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-mesa-a3', pg_temp.id('a', 5, 2), 'chave-a3-propria');   -- QR antigo
+  select * into r2 from pg_temp.pedir('token-mesa-a3-novo', pg_temp.id('a', 5, 2), 'chave-a3-propria');  -- QR novo
+  perform pg_temp.voltar_dono();
+  if r.res is not null or r.erro is distinct from 'TABLE_NOT_FOUND' then
+    raise exception 'VAZAMENTO: o QR antigo da mesa A3 (já trocado) ainda devolveu o pedido pela chave: % (%)', r.res, r.erro;
+  end if;
+  if r2.erro is not null or r2.res->>'id' is null
+     or (select table_id from public.orders where id = (r2.res->>'id')::uuid) is distinct from pg_temp.id('a', 3, 3) then
+    raise exception 'com o QR novo a mesa A3 deveria devolver o pedido dela pela chave e devolveu: % (%)', r2.res, r2.erro;
+  end if;
+  update public.tables set qr_token = 'token-mesa-a3' where id = pg_temp.id('a', 3, 3);   -- como estava
 
   -- ---- iv) mesma chave em restaurantes diferentes: dois pedidos distintos --------------------
   perform pg_temp.entrar_anon();
