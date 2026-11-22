@@ -347,10 +347,234 @@ begin
   end if;
 end $$;
 
--- LACUNA CONHECIDA (de propósito, sem teste): place_order procura a idempotency_key no banco
--- inteiro, não por restaurante. Reenviar a chave de um pedido de B ('chave-b-1') por uma mesa
--- de A devolveria o id e o public_token do pedido de B. A correção pede uma migration nova
--- (por exemplo, chave única por restaurante) e fica para outro PR. Quando corrigir, acrescente
--- aqui o teste: place_order('token-mesa-a1', ..., 'chave-b-1') não pode devolver o pedido de B.
+-- ---------------------------------------------------------------------
+-- e4) Idempotência de place_order: a chave só vale dentro da MESMA MESA
+-- ---------------------------------------------------------------------
+-- Até a migration 0010 a chave era única no banco inteiro e place_order a procurava antes de
+-- validar a mesa: reenviar a chave de um pedido de B por uma mesa de A devolvia o id e o
+-- public_token do pedido de B. Agora a chave é única por restaurante (orders_restaurant_id_
+-- idempotency_key_key) e só é procurada dentro da mesma mesa, depois de validar a mesa:
+--   i)   mesa de A com a chave de um pedido de B: pedido NOVO de A, nunca o de B (e o inverso)
+--   ii)  outra mesa do MESMO restaurante com a chave: nunca devolve o pedido da primeira mesa
+--        (hoje o banco recusa com unique_violation, 23505, e nada é gravado)
+--   iii) mesma chave na mesma mesa: devolve o mesmo pedido (a idempotência continua valendo)
+--   iv)  mesma chave em restaurantes diferentes: dois pedidos distintos, um em cada restaurante
+-- A corrida (duas chamadas ao mesmo tempo com a mesma chave) não cabe numa transação só e
+-- fica coberta pelo cadeado da função (pg_advisory_xact_lock); ver comentário na migration 0010.
+
+-- Chama place_order (1 item, balcão) e devolve o resultado, o SQLSTATE e a mensagem de erro.
+-- Em caso de erro o bloco desfaz tudo o que a função fez até ali.
+create function pg_temp.pedir(p_token text, p_item uuid, p_chave text,
+                              out res jsonb, out estado text, out erro text)
+language plpgsql as $$
+begin
+  res := public.place_order(p_token, jsonb_build_array(pg_temp.linha(p_item, 1)), 'counter', 0, p_chave);
+exception when others then
+  res := null;
+  estado := sqlstate;
+  erro := sqlerrm;
+end $$;
+
+do $$
+declare
+  r record;
+  r2 record;
+  v_ped public.orders%rowtype;
+  v_fora_de_a text;
+  v_fora_de_b text;
+  v_seq_a int;
+  v_seq_b int;
+  v_n bigint;
+  v_id_novo_a uuid;
+  v_id_novo_b uuid;
+begin
+  -- Estrutura: a chave única global sumiu; no lugar dela, única por (restaurante, chave)
+  if exists (select 1 from pg_constraint c
+              where c.conrelid = 'public.orders'::regclass and c.contype = 'u'
+                and (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+                      where a.attrelid = c.conrelid and a.attnum = any (c.conkey)) = array['idempotency_key']) then
+    raise exception 'orders ainda tem chave única só em idempotency_key (global): a chave de um restaurante bloqueia a de outro e place_order a procuraria no banco inteiro';
+  end if;
+  if not exists (select 1 from pg_constraint c
+                  where c.conrelid = 'public.orders'::regclass and c.contype = 'u'
+                    and (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+                          where a.attrelid = c.conrelid and a.attnum = any (c.conkey)) = array['idempotency_key', 'restaurant_id']) then
+    raise exception 'orders deveria ter chave única em (restaurant_id, idempotency_key) e não tem';
+  end if;
+
+  -- Uma segunda mesa ATIVA de A (as de teste têm só a A1 ativa), para o caso "outra mesa do mesmo restaurante"
+  insert into public.tables (id, restaurant_id, label, qr_token, active)
+  values (pg_temp.id('a', 3, 3), pg_temp.id('a', 1, 1), 'Mesa A3', 'token-mesa-a3', true);
+
+  -- ---- iii) mesma chave na mesma mesa: o mesmo pedido, nada novo ----------------------------
+  select order_seq into v_seq_a from public.restaurants where id = pg_temp.id('a', 1, 1);
+  select count(*) into v_n from public.orders where restaurant_id = pg_temp.id('a', 1, 1);
+  v_fora_de_a := pg_temp.foto_fora('aaaaaaaa');
+  perform pg_temp.entrar_anon();
+  select * into r from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-a-1');
+  perform pg_temp.voltar_dono();
+  if r.erro is not null then
+    raise exception 'iii) reenviar a chave do pedido A1 pela mesa A1 deu erro (%): %', r.estado, r.erro;
+  end if;
+  if (r.res->>'id')::uuid is distinct from pg_temp.id('a', 8, 1) or r.res->>'public_token' is distinct from 'token-pedido-a1'
+     or (r.res->>'number')::int is distinct from 101 then
+    raise exception 'iii) a mesma chave na mesma mesa deveria devolver o pedido original (A1, número 101) e devolveu %', r.res;
+  end if;
+  if (select order_seq from public.restaurants where id = pg_temp.id('a', 1, 1)) <> v_seq_a
+     or (select count(*) from public.orders where restaurant_id = pg_temp.id('a', 1, 1)) <> v_n then
+    raise exception 'iii) o reenvio da chave não pode criar pedido nem gastar número da sequência de A';
+  end if;
+  if pg_temp.foto_fora('aaaaaaaa') <> v_fora_de_a then
+    raise exception 'iii) o reenvio da chave de A mexeu em linhas de outros restaurantes';
+  end if;
+
+  -- chave nova: o primeiro envio cria; o segundo devolve o mesmo e a sequência anda uma vez só
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-nova-a');
+  select * into r2 from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-nova-a');
+  perform pg_temp.voltar_dono();
+  if r.erro is not null or r2.erro is not null then
+    raise exception 'iii) dois envios com a chave nova da mesa A1 deram erro: % / %', r.erro, r2.erro;
+  end if;
+  if r.res->>'id' is distinct from r2.res->>'id' or r.res->>'public_token' is distinct from r2.res->>'public_token'
+     or r.res->>'number' is distinct from r2.res->>'number' then
+    raise exception 'iii) a mesma chave na mesma mesa gerou dois pedidos diferentes: % e %', r.res, r2.res;
+  end if;
+  select count(*) into v_n from public.orders
+   where restaurant_id = pg_temp.id('a', 1, 1) and idempotency_key = 'chave-nova-a';
+  if v_n <> 1 or (select order_seq from public.restaurants where id = pg_temp.id('a', 1, 1)) <> v_seq_a + 1 then
+    raise exception 'iii) esperado 1 pedido com a chave nova e a sequência de A avançada 1 vez; há % pedido(s)', v_n;
+  end if;
+  select * into v_ped from public.orders where id = (r.res->>'id')::uuid;
+  if v_ped.restaurant_id is distinct from pg_temp.id('a', 1, 1) or v_ped.table_id is distinct from pg_temp.id('a', 3, 1) then
+    raise exception 'iii) o pedido da chave nova deveria ser da mesa A1 do restaurante A';
+  end if;
+
+  -- ---- i) mesa de A com a chave de um pedido de B: nunca devolve o de B ---------------------
+  v_fora_de_a := pg_temp.foto_fora('aaaaaaaa');   -- tudo que não é de A: B tem de ficar intacto
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-b-1');
+  select * into r2 from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-b-1');
+  perform pg_temp.voltar_dono();
+  if r.erro is null then
+    if (r.res->>'id')::uuid = pg_temp.id('b', 8, 1) or r.res->>'public_token' = 'token-pedido-b1'
+       or r.res->>'number' = '501' then
+      raise exception 'VAZAMENTO: a mesa de A reenviou a chave do pedido de B e recebeu o pedido de B: %', r.res;
+    end if;
+    select * into v_ped from public.orders where id = (r.res->>'id')::uuid;
+    if v_ped.restaurant_id is distinct from pg_temp.id('a', 1, 1) or v_ped.table_id is distinct from pg_temp.id('a', 3, 1) then
+      raise exception 'i) a mesa A1 com a chave de B deveria criar um pedido NOVO de A na mesa A1 e criou %', row(v_ped.restaurant_id, v_ped.table_id);
+    end if;
+    -- a nova tentativa (mesma chave, mesma mesa A1) devolve esse mesmo pedido novo de A
+    if r2.res->>'id' is distinct from r.res->>'id' then
+      raise exception 'i) reenviar a chave de B pela mesa A1 duas vezes deveria devolver o mesmo pedido de A: % e %', r.res, r2.res;
+    end if;
+  else
+    -- restaurantes diferentes podem repetir a chave: recusar aqui seria um defeito novo
+    raise exception 'i) a mesa A1 com a chave de B deveria criar um pedido novo de A (restaurantes diferentes podem repetir a chave) e deu erro (%): %', r.estado, r.erro;
+  end if;
+  v_id_novo_a := (r.res->>'id')::uuid;
+  -- o pedido de B continua como estava, com a chave dele, e nada de B mudou
+  select * into v_ped from public.orders where id = pg_temp.id('b', 8, 1);
+  if v_ped.idempotency_key is distinct from 'chave-b-1' or v_ped.restaurant_id is distinct from pg_temp.id('b', 1, 1)
+     or v_ped.table_id is distinct from pg_temp.id('b', 3, 1) or v_ped.public_token is distinct from 'token-pedido-b1' then
+    raise exception 'VAZAMENTO: o pedido B1 mudou depois que uma mesa de A reenviou a chave dele';
+  end if;
+  if pg_temp.foto_fora('aaaaaaaa') <> v_fora_de_a then
+    raise exception 'VAZAMENTO: reenviar a chave de B por uma mesa de A alterou linhas fora de A (B ou seed)';
+  end if;
+
+  -- o espelho: mesa de B com a chave de um pedido de A
+  v_fora_de_b := pg_temp.foto_fora('bbbbbbbb');
+  perform pg_temp.entrar_anon();
+  select * into r from pg_temp.pedir('token-mesa-b1', pg_temp.id('b', 5, 2), 'chave-a-1');
+  perform pg_temp.voltar_dono();
+  if r.erro is not null then
+    raise exception 'i) a mesa B1 com a chave de A deveria criar um pedido novo de B e deu erro (%): %', r.estado, r.erro;
+  end if;
+  if (r.res->>'id')::uuid = pg_temp.id('a', 8, 1) or r.res->>'public_token' = 'token-pedido-a1' or r.res->>'number' = '101' then
+    raise exception 'VAZAMENTO: a mesa de B reenviou a chave do pedido de A e recebeu o pedido de A: %', r.res;
+  end if;
+  select * into v_ped from public.orders where id = (r.res->>'id')::uuid;
+  if v_ped.restaurant_id is distinct from pg_temp.id('b', 1, 1) or v_ped.table_id is distinct from pg_temp.id('b', 3, 1) then
+    raise exception 'i) a mesa B1 com a chave de A deveria criar um pedido NOVO de B na mesa B1';
+  end if;
+  v_id_novo_b := (r.res->>'id')::uuid;
+  if pg_temp.foto_fora('bbbbbbbb') <> v_fora_de_b then
+    -- o pedido novo de B está dentro de B; só A e o seed contam como "fora de B", e nada disso pode mudar
+    raise exception 'VAZAMENTO: reenviar a chave de A por uma mesa de B alterou linhas fora de B (A ou seed)';
+  end if;
+
+  -- ---- ii) outra mesa do MESMO restaurante: nunca recupera o pedido da primeira mesa ---------
+  select order_seq into v_seq_a from public.restaurants where id = pg_temp.id('a', 1, 1);
+  select count(*) into v_n from public.orders where restaurant_id = pg_temp.id('a', 1, 1);
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-mesa-a3', pg_temp.id('a', 5, 2), 'chave-a-1');       -- chave do pedido A1 da mesa A1
+  select * into r2 from pg_temp.pedir('token-mesa-a3', pg_temp.id('a', 5, 2), 'chave-nova-a');    -- chave do pedido novo da mesa A1
+  perform pg_temp.voltar_dono();
+  if r.res is not null and ((r.res->>'id')::uuid = pg_temp.id('a', 8, 1) or r.res->>'public_token' = 'token-pedido-a1')
+     or r2.res is not null and (r2.res->>'id' in (select id::text from public.orders where idempotency_key = 'chave-nova-a' and table_id = pg_temp.id('a', 3, 1))) then
+    raise exception 'VAZAMENTO: outra mesa do restaurante A reenviou a chave de um pedido da mesa A1 e recebeu o pedido dela: % / %', r.res, r2.res;
+  end if;
+  if r.erro is null or r2.erro is null then
+    raise exception 'ii) a mesa A3 com chave já usada pela mesa A1 deveria ser recusada (chave única por restaurante); resultado: % / %', r.res, r2.res;
+  end if;
+  if r.estado <> '23505' or r2.estado <> '23505' then
+    raise exception 'ii) a recusa deveria ser unique_violation (23505) e foi % / %: % / %', r.estado, r2.estado, r.erro, r2.erro;
+  end if;
+  if (select order_seq from public.restaurants where id = pg_temp.id('a', 1, 1)) <> v_seq_a
+     or (select count(*) from public.orders where restaurant_id = pg_temp.id('a', 1, 1)) <> v_n
+     or exists (select 1 from public.orders where table_id = pg_temp.id('a', 3, 3)) then
+    raise exception 'ii) a recusa não pode gravar pedido nem gastar número da sequência de A';
+  end if;
+
+  -- A mesa inválida ou inativa é validada ANTES da chave: nunca devolve pedido de ninguém
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-que-nao-existe', pg_temp.id('a', 5, 2), 'chave-b-1');
+  select * into r2 from pg_temp.pedir('token-mesa-a2-inativa', pg_temp.id('a', 5, 2), 'chave-a-1');
+  perform pg_temp.voltar_dono();
+  if r.res is not null or r2.res is not null or r.erro is distinct from 'TABLE_NOT_FOUND' or r2.erro is distinct from 'TABLE_NOT_FOUND' then
+    raise exception 'VAZAMENTO: place_order com mesa inexistente ou inativa deveria dar TABLE_NOT_FOUND antes de olhar a chave e deu: % (%) / % (%)',
+                    r.res, r.erro, r2.res, r2.erro;
+  end if;
+
+  -- ---- iv) mesma chave em restaurantes diferentes: dois pedidos distintos --------------------
+  perform pg_temp.entrar_anon();
+  select * into r  from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-compartilhada');
+  select * into r2 from pg_temp.pedir('token-mesa-b1', pg_temp.id('b', 5, 2), 'chave-compartilhada');
+  perform pg_temp.voltar_dono();
+  if r.erro is not null or r2.erro is not null then
+    raise exception 'iv) a mesma chave em A e em B deveria funcionar nos dois restaurantes e deu erro: % / %', r.erro, r2.erro;
+  end if;
+  if r.res->>'id' = r2.res->>'id' or r.res->>'public_token' = r2.res->>'public_token' then
+    raise exception 'VAZAMENTO: a mesma chave em A e em B devolveu o mesmo pedido: % e %', r.res, r2.res;
+  end if;
+  if (select restaurant_id from public.orders where id = (r.res->>'id')::uuid) is distinct from pg_temp.id('a', 1, 1)
+     or (select restaurant_id from public.orders where id = (r2.res->>'id')::uuid) is distinct from pg_temp.id('b', 1, 1) then
+    raise exception 'iv) cada pedido deveria ficar no restaurante da sua mesa (A e B)';
+  end if;
+  select count(*) into v_n from public.orders where idempotency_key = 'chave-compartilhada';
+  if v_n <> 2 then
+    raise exception 'iv) esperado 2 pedidos com a chave compartilhada (um por restaurante) e há %', v_n;
+  end if;
+  -- e o reenvio em cada restaurante devolve o pedido do PRÓPRIO restaurante
+  perform pg_temp.entrar_anon();
+  select * into r from pg_temp.pedir('token-mesa-a1', pg_temp.id('a', 5, 2), 'chave-compartilhada') ;
+  select * into r2 from pg_temp.pedir('token-mesa-b1', pg_temp.id('b', 5, 2), 'chave-compartilhada');
+  perform pg_temp.voltar_dono();
+  if (select restaurant_id from public.orders where id = (r.res->>'id')::uuid) is distinct from pg_temp.id('a', 1, 1)
+     or (select restaurant_id from public.orders where id = (r2.res->>'id')::uuid) is distinct from pg_temp.id('b', 1, 1)
+     or (select count(*) from public.orders where idempotency_key = 'chave-compartilhada') <> 2 then
+    raise exception 'iv) o reenvio da chave compartilhada deveria devolver o pedido do próprio restaurante, sem criar outro';
+  end if;
+
+  -- Sanidade do banco: a chave única por restaurante também vale para quem escreve direto
+  begin
+    insert into public.orders (restaurant_id, table_id, number, payment_method, idempotency_key)
+    values (pg_temp.id('a', 1, 1), pg_temp.id('a', 3, 1), 9001, 'counter', 'chave-a-1');
+    raise exception 'o banco aceitou duas chaves iguais no mesmo restaurante (orders_restaurant_id_idempotency_key_key)';
+  exception when unique_violation then null;
+  end;
+end $$;
 
 rollback;

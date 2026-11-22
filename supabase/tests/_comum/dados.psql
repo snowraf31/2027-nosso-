@@ -1,5 +1,5 @@
 -- =====================================================================
--- Dados e ferramentas comuns aos testes de isolamento (0001, 0002, 0003 e 0004)
+-- Dados e ferramentas comuns aos testes de isolamento (0001, 0002, 0003 e 0005)
 --
 -- NÃO é um teste: fica fora do glob supabase/tests/*.sql do banco.sh e entra nos
 -- testes com  \ir _comum/dados.psql  logo depois do "begin;". Tudo o que ele cria
