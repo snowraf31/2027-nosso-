@@ -399,6 +399,11 @@ begin
   if v_erro is distinct from 'ITEM_NOT_FOUND' then
     raise exception 'place_order com mesa de A e item de B deveria dar ITEM_NOT_FOUND e deu: %', coalesce(v_erro, 'sucesso (VAZAMENTO: pedido criado)');
   end if;
+  -- também com item de B que não exige adicional (assim nenhuma outra regra mascara o vazamento)
+  v_erro := pg_temp.erro_do_pedido('token-mesa-a1', jsonb_build_array(pg_temp.linha(pg_temp.id('b', 5, 2), 1)));
+  if v_erro is distinct from 'ITEM_NOT_FOUND' then
+    raise exception 'place_order com mesa de A e item simples de B deveria dar ITEM_NOT_FOUND e deu: %', coalesce(v_erro, 'sucesso (VAZAMENTO: pedido criado)');
+  end if;
   v_erro := pg_temp.erro_do_pedido('token-mesa-b1', jsonb_build_array(pg_temp.linha(pg_temp.id('a', 5, 1), 1)));
   if v_erro is distinct from 'ITEM_NOT_FOUND' then
     raise exception 'place_order com mesa de B e item de A deveria dar ITEM_NOT_FOUND e deu: %', coalesce(v_erro, 'sucesso (VAZAMENTO: pedido criado)');
