@@ -1,0 +1,26 @@
+# Dependabot do Tabletop: mensal, poucos PRs e atualizações agrupadas.
+# Os PRs dele andam num trem próprio (trem-deps-<data>), separado do produto.
+# Atualizações major ficam fora do merge automático (ver docs/ai-agents/orquestracao.md).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      npm-menores:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps

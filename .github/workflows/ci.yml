@@ -1,0 +1,143 @@
+# CI do Tabletop. Um único check obrigatório: "ci-ok".
+# - Não roda em PR rascunho (os PRs individuais ficam em rascunho; quem roda é o PR do trem).
+# - Cada parte só roda quando mudou; mudança no CI roda tudo.
+# - Nunca use "re-run failed jobs": o ci-ok depende do resultado dos outros jobs.
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mudancas:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.diff.outputs.app }}
+      banco: ${{ steps.diff.outputs.banco }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then
+            echo "app=true" >> "$GITHUB_OUTPUT"
+            echo "banco=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$BASE_SHA" HEAD)"
+          echo "$files"
+          tudo=false
+          grep -qE '^(\.github/workflows/|scripts/ci/)' <<<"$files" && tudo=true
+          app=$tudo; banco=$tudo
+          # App roda se algum arquivo estiver fora de supabase/, docs/, .claude/, *.md e dependabot.
+          grep -vqE '^(supabase/|docs/|\.claude/|\.github/dependabot\.yml$|.*\.md$)' <<<"$files" && app=true
+          grep -qE '^supabase/' <<<"$files" && banco=true
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "banco=$banco" >> "$GITHUB_OUTPUT"
+
+  politica:
+    needs: mudancas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Política do repositório
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci/politica.py --base "${BASE_SHA:-HEAD}"
+
+  app:
+    needs: mudancas
+    if: needs.mudancas.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: chave-publica-de-exemplo-para-o-build
+      NEXT_PUBLIC_SITE_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache do npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json') }}
+          restore-keys: npm-${{ runner.os }}-
+      - name: Instalar
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "::warning::Sem package-lock.json: usando npm install. Gere e commite o lockfile."
+            npm install --no-audit --no-fund
+          fi
+      - run: npm run typecheck
+      - run: npm run lint --if-present
+      - run: npm test --if-present
+      - run: npm run build
+
+  banco:
+    needs: mudancas
+    if: needs.mudancas.outputs.banco == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Migrations, seeds e testes do banco
+        run: bash scripts/ci/banco.sh
+
+  ci-ok:
+    needs: [mudancas, politica, app, banco]
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Conferir os jobs
+        env:
+          MUDANCAS: ${{ needs.mudancas.result }}
+          POLITICA: ${{ needs.politica.result }}
+          APP: ${{ needs.app.result }}
+          BANCO: ${{ needs.banco.result }}
+        run: |
+          echo "mudancas=$MUDANCAS politica=$POLITICA app=$APP banco=$BANCO"
+          [ "$MUDANCAS" = success ] || exit 1
+          [ "$POLITICA" = success ] || exit 1
+          for r in "$APP" "$BANCO"; do
+            [ "$r" = success ] || [ "$r" = skipped ] || exit 1
+          done
