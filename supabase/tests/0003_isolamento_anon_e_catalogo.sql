@@ -5,21 +5,22 @@
 --      permissão) e não executa is_staff nem bootstrap_first_owner
 --   f) guarda do catálogo (vale para objetos FUTUROS): toda tabela do schema public tem RLS
 --      ligada; anon não tem privilégio nenhum em tabela ou view do public; authenticated só
---      escreve nas 3 colunas da cozinha; view, view materializada e tabela externa legíveis
+--      escreve nas 3 colunas da cozinha e não tem TRUNCATE, REFERENCES, TRIGGER (nem MAINTAIN no
+--      Postgres 17) em tabela nenhuma; nenhum dos dois tem privilégio em sequência; ninguém de fora
+--      cria objeto em public, em extensions nem no banco; view, view materializada e tabela externa legíveis
 --      por authenticated não podem furar a RLS; só as funções security definer conhecidas
 --      (por assinatura) são executáveis por anon e por authenticated; tabela do Realtime
 --      tem RLS; toda tabela está na lista dos testes (pg_temp.tabelas()); toda política de
 --      RLS filtra por is_staff. Objeto novo sem RLS, com grant aberto demais ou com política
 --      frouxa derruba o CI aqui.
 --
--- LACUNA CONHECIDA (não é falha deste teste, é aviso): o 0002_security.sql só revoga
--- INSERT, UPDATE e DELETE de authenticated; ele continua com TRUNCATE (que ignora a RLS e
--- esvaziaria as tabelas de todos os restaurantes), TRIGGER e REFERENCES nas 10 tabelas.
--- Pela API (PostgREST) ninguém dispara isso, mas quem conecta direto no SQL sim. A correção
--- é uma migration à parte: revoke truncate, references, trigger on all tables in schema
--- public from authenticated. Enquanto ela não existe, a guarda 3b só avisa, e SÓ no estado
--- legado exato (as 10 tabelas, os 3 privilégios, nada além). Com a migration aplicada, ou em
--- qualquer outro estado (tabela nova, privilégio em parte das tabelas), a guarda derruba o CI.
+-- As guardas 3b e 3d são estritas: o 0002_security.sql só revogava INSERT, UPDATE e DELETE de
+-- authenticated, que ficava com TRUNCATE (ignora a RLS e esvaziaria as tabelas de todos os restaurantes),
+-- TRIGGER e REFERENCES; no Postgres 17 também com MAINTAIN (LOCK TABLE em qualquer modo, VACUUM FULL,
+-- CLUSTER e REINDEX, tudo sem RLS: um "lock table ... access exclusive" travaria os pedidos de todos).
+-- A migration 0010 revogou tudo isso (tabelas atuais e o padrão das futuras) e o CREATE de quem é de
+-- fora. Se qualquer um voltar, a guarda derruba o CI. O MAINTAIN só é conferido quando o banco é
+-- Postgres 17 ou mais novo (no 16 o privilégio nem existe e a função dá erro); o CI atual roda o 16.
 --
 -- Autocontido: cria os próprios dados e termina em rollback. Falha com raise exception.
 -- =====================================================================
@@ -107,6 +108,18 @@ begin
     raise exception 'O papel anon (visitante) tem privilégio em: %. O cliente só pode usar as funções com token; faça revoke all on ... from anon.', v_lista;
   end if;
 
+  -- 2b. anon e authenticated não têm privilégio nenhum em sequência (setval/nextval pelo visitante
+  --     bagunçaria numeração compartilhada)
+  select string_agg(c.relname || ' (' || r || ')', ', ' order by c.relname, r) into v_lista
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    cross join unnest(array['anon', 'authenticated']) r
+   where n.nspname = 'public' and c.relkind = 'S'
+     and has_sequence_privilege(r, c.oid, 'usage,select,update');
+  if v_lista is not null then
+    raise exception 'anon ou authenticated tem privilégio em sequência do public: %. Faça revoke all on sequence ... from anon, authenticated (a migration 0010 já tirou do padrão).', v_lista;
+  end if;
+
   -- 3. authenticated: sem INSERT/DELETE em lugar nenhum; UPDATE só nas 3 colunas da cozinha
   select string_agg(c.relname, ', ' order by c.relname) into v_lista
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -130,19 +143,36 @@ begin
 
   -- 3b. authenticated: TRUNCATE, REFERENCES e TRIGGER ignoram a RLS (TRUNCATE esvazia a tabela
   --     de todos os restaurantes; um TRIGGER roda em cima das escritas de qualquer um deles).
+  --     No Postgres 17, MAINTAIN também: LOCK TABLE em modo access exclusive trava a tabela de todos.
   select string_agg(c.relname || ' (' || p || ')', ', ' order by c.relname, p)
     into v_lista
     from pg_class c
     join pg_namespace n on n.oid = c.relnamespace
-    cross join unnest(array['truncate', 'references', 'trigger']) p
+    cross join unnest(array['truncate', 'references', 'trigger']
+                      || case when current_setting('server_version_num')::int >= 170000
+                              then array['maintain'] else '{}'::text[] end) p
    where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
      and has_table_privilege('authenticated', c.oid, p);
   if v_lista is not null then
-    if pg_temp.truncate_legado() then
-      raise warning 'LACUNA CONHECIDA (ainda sem migration): o papel authenticated (staff) tem TRUNCATE, REFERENCES e TRIGGER nas 10 tabelas, e TRUNCATE ignora a RLS. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated.';
-    else
-      raise exception 'O papel authenticated (staff) tem TRUNCATE, REFERENCES ou TRIGGER em: %. Esses privilégios ignoram a RLS (TRUNCATE esvazia a tabela de todos os restaurantes). Faça revoke truncate, references, trigger ... from authenticated.', v_lista;
-    end if;
+    raise exception 'O papel authenticated (staff) tem TRUNCATE, REFERENCES, TRIGGER ou MAINTAIN em: %. Esses privilégios ignoram a RLS (TRUNCATE esvazia a tabela de todos os restaurantes; MAINTAIN, no Postgres 17, deixa travar a tabela com LOCK). Faça revoke truncate, references, trigger (e maintain no PG 17) ... from authenticated (padrão da migration 0010).', v_lista;
+  end if;
+
+  -- 3d. Ninguém de fora cria objeto nos schemas do search_path das funções security definer
+  --     (public e extensions) nem no banco: um objeto criado ali (por exemplo uma função com o
+  --     mesmo nome e tipos exatos) seria achado antes do objeto de verdade e rodaria com o poder
+  --     do dono. has_*_privilege já inclui o que vem do PUBLIC.
+  select string_agg(alvo || ' (' || r || ')', ', ' order by alvo, r) into v_lista
+    from unnest(array['anon', 'authenticated']) r
+    cross join lateral (
+      select 'schema ' || n.nspname as alvo
+        from pg_namespace n
+       where n.nspname in ('public', 'extensions') and has_schema_privilege(r, n.oid, 'create')
+      union all
+      select 'banco ' || current_database()
+       where has_database_privilege(r, current_database(), 'create')
+    ) x;
+  if v_lista is not null then
+    raise exception 'Quem é de fora pode criar objetos em: %. Faça revoke create on schema public (e extensions) e on database ... from public, anon, authenticated (padrão da migration 0010).', v_lista;
   end if;
 
   -- 3c. View, view materializada e tabela externa rodam com o poder do DONO e ignoram a RLS:

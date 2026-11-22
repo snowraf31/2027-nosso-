@@ -12,15 +12,12 @@
 --   - place_order grava pedido em outro restaurante, ou com o preço que o atacante inventar.
 --
 --   1. guarda do catálogo: toda função security definer do public tem search_path terminando
---      em pg_temp (ou vazio). Função nova fora da lista legada derruba o CI.
+--      em pg_temp (ou vazio). Função sem isso derruba o CI.
 --   2. comportamento: o atacante cria a tabela temporária forjada e chama a função.
 --
--- LACUNA CONHECIDA, sem migration ainda: hoje as 5 funções têm search_path = public (place_order:
--- public, extensions), sem pg_temp no fim. Corrigir (migration à parte) com
---   alter function ... set search_path = public, pg_temp   (place_order: public, extensions, pg_temp)
--- Enquanto a migration não existe, o ataque funciona e este teste só AVISA (raise warning), função
--- por função. Depois da migration o mesmo teste passa a derrubar o CI sozinho se alguma função
--- voltar a ser enganada.
+-- Estrito: a migration 0010 pôs pg_temp por último nas 5 funções (is_staff, get_guest_menu,
+-- get_guest_order, place_order e bootstrap_first_owner). Se alguma perder a blindagem, ou for
+-- enganada mesmo com ela, o CI cai (não existe mais modo "só avisa").
 --
 -- Este arquivo roda numa sessão própria e os casos de place_order vêm primeiro; entre um caso e
 -- outro o teste usa DISCARD PLANS, para o plano guardado de um caso não esconder a tabela forjada
@@ -36,29 +33,32 @@ begin;
 -- ---------------------------------------------------------------------
 do $$
 declare
-  v_novas text;
-  v_legadas text;
-  v_legado text[] := array['bootstrap_first_owner()', 'get_guest_menu(text, text)',
-                           'get_guest_order(uuid, text)', 'is_staff(uuid, text[])',
-                           'place_order(text, jsonb, text, integer, text)'];
+  v_sem_blindagem text;
+  v_esperadas text[] := array['bootstrap_first_owner()', 'get_guest_menu(text, text)',
+                              'get_guest_order(uuid, text)', 'is_staff(uuid, text[])',
+                              'place_order(text, jsonb, text, integer, text)'];
+  v_faltam text;
 begin
-  with f as (
-    select p.proname || '(' || oidvectortypes(p.proargtypes) || ')' as assinatura
-      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname = 'public' and p.prosecdef
-       and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
-       and not pg_temp.search_path_blindado(p.oid::regprocedure)
-  )
-  select string_agg(assinatura, ', ' order by assinatura) filter (where assinatura <> all (v_legado)),
-         string_agg(assinatura, ', ' order by assinatura) filter (where assinatura = any (v_legado))
-    into v_novas, v_legadas
-    from f;
-
-  if v_novas is not null then
-    raise exception 'Função security definer sem pg_temp por último no search_path: %. Uma tabela temporária criada pelo chamador esconde a tabela do public e engana a função. Use: set search_path = public, pg_temp.', v_novas;
+  select string_agg(p.proname || '(' || oidvectortypes(p.proargtypes) || ')', ', ' order by p.proname)
+    into v_sem_blindagem
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.prosecdef
+     and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+     and not pg_temp.search_path_blindado(p.oid::regprocedure);
+  if v_sem_blindagem is not null then
+    raise exception 'Função security definer sem pg_temp por último no search_path: %. Uma tabela temporária criada pelo chamador esconde a tabela do public e engana a função. Use: set search_path = public, pg_temp (place_order: public, extensions, pg_temp). Funções recriadas com create or replace precisam repetir o set search_path.', v_sem_blindagem;
   end if;
-  if v_legadas is not null then
-    raise warning 'LACUNA CONHECIDA (ainda sem migration): security definer sem pg_temp por último no search_path: %. Corrigir com: alter function ... set search_path = public, pg_temp (place_order: public, extensions, pg_temp).', v_legadas;
+
+  -- As 5 funções conhecidas continuam existindo como security definer (senão a guarda acima
+  -- passaria "sem nada para olhar" se alguém as trocasse por outro tipo de função).
+  select string_agg(e, ', ' order by e) into v_faltam
+    from unnest(v_esperadas) e
+   where not exists (
+     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.prosecdef
+        and p.proname || '(' || oidvectortypes(p.proargtypes) || ')' = e);
+  if v_faltam is not null then
+    raise exception 'PREPARO DO TESTE: função(ões) security definer esperada(s) não encontrada(s) no public: %. Se foram renomeadas, atualize v_esperadas e os casos abaixo.', v_faltam;
   end if;
 end $$;
 

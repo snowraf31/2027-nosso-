@@ -1,5 +1,5 @@
 -- =====================================================================
--- Dados e ferramentas comuns aos testes de isolamento (0001, 0002, 0003 e 0004)
+-- Dados e ferramentas comuns aos testes de isolamento (0001, 0002, 0003 e 0005)
 --
 -- NÃO é um teste: fica fora do glob supabase/tests/*.sql do banco.sh e entra nos
 -- testes com  \ir _comum/dados.psql  logo depois do "begin;". Tudo o que ele cria
@@ -267,31 +267,8 @@ end $$;
 
 
 -- ---------------------------------------------------------------------
--- Lacunas conhecidas que dependem de uma migration (ainda não existe; este PR não cria migration).
--- Enquanto a migration não entra, o teste AVISA (raise warning); depois dela, o mesmo teste
--- passa a DERRUBAR o CI sozinho. Qualquer estado fora do estado legado exato derruba o CI.
+-- Regras que dependem da migration 0010 (estritas: não existe mais modo "só avisa")
 -- ---------------------------------------------------------------------
-
--- TRUNCATE, REFERENCES e TRIGGER: o 0002 só revoga INSERT, UPDATE e DELETE de authenticated.
--- Verdadeiro só no estado legado exato: as 10 tabelas, os 3 privilégios e nada além.
--- A migration (revoke truncate, references, trigger on all tables in schema public from authenticated)
--- faz esta função devolver falso.
-create function pg_temp.truncate_legado() returns boolean
-language plpgsql stable as $$
-declare
-  v_legado text[] := array(select tabela from pg_temp.tabelas());
-  v_total int;
-  v_conhecidos int;
-begin
-  select count(*), count(*) filter (where c.relname = any (v_legado))
-    into v_total, v_conhecidos
-    from pg_class c
-    join pg_namespace n on n.oid = c.relnamespace
-    cross join unnest(array['truncate', 'references', 'trigger']) p
-   where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
-     and has_table_privilege('authenticated', c.oid, p);
-  return v_total = 3 * cardinality(v_legado) and v_conhecidos = v_total;
-end $$;
 
 -- search_path de função security definer: "blindado" quando termina em pg_temp (ou é vazio).
 -- Sem isso, uma tabela temporária criada pelo chamador (com o mesmo nome de uma tabela do
@@ -308,13 +285,13 @@ language sql stable as $$
 $$;
 
 -- Chamada quando uma tabela temporária forjada enganou uma função security definer.
--- Função com search_path blindado e mesmo assim enganada: falha de segurança nova, derruba o CI.
--- Função ainda sem a blindagem (estado legado): aviso, até a migration existir.
+-- Depois da 0010 todas as funções são blindadas: qualquer vazamento derruba o CI, tenha a função
+-- o search_path blindado (falha de segurança nova) ou não (a blindagem foi desfeita).
 create function pg_temp.vazamento_de_funcao(p_func regprocedure, p_o_que_vazou text) returns void
 language plpgsql as $$
 begin
   if pg_temp.search_path_blindado(p_func) then
     raise exception 'VAZAMENTO: % (mesmo com o search_path de % terminando em pg_temp)', p_o_que_vazou, p_func;
   end if;
-  raise warning 'LACUNA CONHECIDA (ainda sem migration): % Corrigir com migration: alter function % set search_path = ..., pg_temp (pg_temp por último).', p_o_que_vazou, p_func;
+  raise exception 'VAZAMENTO: % (o search_path de % não termina em pg_temp: a 0010 foi desfeita ou a função foi recriada sem ele; use set search_path = public, pg_temp)', p_o_que_vazou, p_func;
 end $$;
