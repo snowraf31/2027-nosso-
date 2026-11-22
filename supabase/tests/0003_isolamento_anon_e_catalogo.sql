@@ -3,11 +3,21 @@
 --
 --   d) anon: nenhum privilégio nas tabelas (SELECT, INSERT, UPDATE e DELETE dão erro de
 --      permissão) e não executa is_staff nem bootstrap_first_owner
---   f) guarda do catálogo (vale para tabelas FUTURAS): toda tabela do schema public tem RLS
+--   f) guarda do catálogo (vale para objetos FUTUROS): toda tabela do schema public tem RLS
 --      ligada; anon não tem privilégio nenhum em tabela ou view do public; authenticated só
---      escreve nas 3 colunas da cozinha; anon só executa as 3 funções do cliente entre as
---      security definer; tabela do Realtime tem RLS.
---      Tabela nova sem RLS, ou com grant aberto demais, derruba o CI aqui.
+--      escreve nas 3 colunas da cozinha; view, view materializada e tabela externa legíveis
+--      por authenticated não podem furar a RLS; só as funções security definer conhecidas
+--      (por assinatura) são executáveis por anon e por authenticated; tabela do Realtime
+--      tem RLS. Objeto novo sem RLS, ou com grant aberto demais, derruba o CI aqui.
+--
+-- LACUNA CONHECIDA (não é falha deste teste, é aviso): o 0002_security.sql só revoga
+-- INSERT, UPDATE e DELETE de authenticated; ele continua com TRUNCATE (que ignora a RLS e
+-- esvaziaria as tabelas de todos os restaurantes), TRIGGER e REFERENCES nas 10 tabelas.
+-- Pela API (PostgREST) ninguém dispara isso, mas quem conecta direto no SQL sim. A correção
+-- é uma migration à parte: revoke truncate, references, trigger on all tables in schema
+-- public from authenticated. Enquanto ela não existe, a guarda 3b só avisa, e SÓ no estado
+-- legado exato (as 10 tabelas, os 3 privilégios, nada além). Com a migration aplicada, ou em
+-- qualquer outro estado (tabela nova, privilégio em parte das tabelas), a guarda derruba o CI.
 --
 -- Autocontido: cria os próprios dados e termina em rollback. Falha com raise exception.
 -- =====================================================================
@@ -73,6 +83,11 @@ end $$;
 do $$
 declare
   v_lista text;
+  v_legado text[] := array['restaurants', 'staff', 'tables', 'menu_categories', 'menu_items',
+                           'modifier_groups', 'modifier_options', 'item_modifier_groups',
+                           'orders', 'order_items'];
+  v_total int;
+  v_conhecidos int;
 begin
   -- 1. Toda tabela do public tem RLS ligada
   select string_agg(c.relname, ', ' order by c.relname) into v_lista
@@ -114,15 +129,59 @@ begin
     raise exception 'O papel authenticated (staff) pode atualizar colunas fora da lista da cozinha: %. Permitidas: orders.status, menu_items.available, modifier_options.available (se a nova coluna é intencional, atualize esta lista com o dev-backend).', v_lista;
   end if;
 
-  -- 4. Funções security definer ignoram a RLS: anon só pode executar as 3 funções do cliente
-  select string_agg(p.oid::regprocedure::text, ', ' order by p.proname) into v_lista
+  -- 3b. authenticated: TRUNCATE, REFERENCES e TRIGGER ignoram a RLS (TRUNCATE esvazia a tabela
+  --     de todos os restaurantes; um TRIGGER roda em cima das escritas de qualquer um deles).
+  select string_agg(c.relname || ' (' || p || ')', ', ' order by c.relname, p),
+         count(*), count(*) filter (where c.relname = any (v_legado))
+    into v_lista, v_total, v_conhecidos
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    cross join unnest(array['truncate', 'references', 'trigger']) p
+   where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
+     and has_table_privilege('authenticated', c.oid, p);
+  if v_lista is not null then
+    if v_total = 3 * cardinality(v_legado) and v_conhecidos = v_total then
+      raise warning 'LACUNA CONHECIDA (ainda sem migration): o papel authenticated (staff) tem TRUNCATE, REFERENCES e TRIGGER nas 10 tabelas, e TRUNCATE ignora a RLS. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated.';
+    else
+      raise exception 'O papel authenticated (staff) tem TRUNCATE, REFERENCES ou TRIGGER em: %. Esses privilégios ignoram a RLS (TRUNCATE esvazia a tabela de todos os restaurantes). Faça revoke truncate, references, trigger ... from authenticated.', v_lista;
+    end if;
+  end if;
+
+  -- 3c. View, view materializada e tabela externa rodam com o poder do DONO e ignoram a RLS:
+  --     se authenticated lê uma delas, só vale view com security_invoker = true (RLS de quem consulta).
+  select string_agg(c.relname || ' (' || case c.relkind when 'v' then 'view' when 'm' then 'view materializada' else 'tabela externa' end || ')',
+                    ', ' order by c.relname) into v_lista
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public' and c.relkind in ('v', 'm', 'f')
+     and (has_table_privilege('authenticated', c.oid, 'select')
+          or has_any_column_privilege('authenticated', c.oid, 'select'))
+     and not (c.relkind = 'v' and exists (select 1 from unnest(coalesce(c.reloptions, '{}'::text[])) o
+                                           where o ~ '^security_invoker(=(true|on|yes|1|t))?$'))
+     and not exists (select 1 from pg_depend d where d.objid = c.oid and d.deptype = 'e');
+  if v_lista is not null then
+    raise exception 'Objeto legível por authenticated que ignora a RLS: %. Crie a view com WITH (security_invoker = true), ou faça revoke select ... from authenticated (view materializada e tabela externa nunca respeitam a RLS).', v_lista;
+  end if;
+
+  -- 4. Funções security definer ignoram a RLS. Só estas (por assinatura, não só pelo nome, para
+  --    uma sobrecarga nova não escapar) podem ser executadas por anon / authenticated:
+  --      as 3 funções do cliente (exigem token) e is_staff (só olha auth.uid()).
+  select string_agg(p.proname || '(' || oidvectortypes(p.proargtypes) || ') [' ||
+                    concat_ws(' e ', case when has_function_privilege('anon', p.oid, 'execute') then 'anon' end,
+                                     case when has_function_privilege('authenticated', p.oid, 'execute') then 'authenticated' end) || ']',
+                    ', ' order by p.proname) into v_lista
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public' and p.prosecdef
-     and p.proname not in ('get_guest_menu', 'get_guest_order', 'place_order')
-     and has_function_privilege('anon', p.oid, 'execute')
-     and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e');
+     and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+     and (   (has_function_privilege('anon', p.oid, 'execute')
+              and p.proname || '(' || oidvectortypes(p.proargtypes) || ')' not in (
+                    'get_guest_menu(text, text)', 'get_guest_order(uuid, text)',
+                    'place_order(text, jsonb, text, integer, text)'))
+          or (has_function_privilege('authenticated', p.oid, 'execute')
+              and p.proname || '(' || oidvectortypes(p.proargtypes) || ')' not in (
+                    'get_guest_menu(text, text)', 'get_guest_order(uuid, text)',
+                    'place_order(text, jsonb, text, integer, text)', 'is_staff(uuid, text[])')));
   if v_lista is not null then
-    raise exception 'Função security definer executável pelo visitante anônimo: %. Faça revoke execute ... from public, anon (padrão do 0004), ou, se for função do cliente com token, inclua na lista deste teste.', v_lista;
+    raise exception 'Função security definer executável por quem não devia (ela ignora a RLS e precisa filtrar por restaurante/token): %. Faça revoke execute ... from public, anon, authenticated (padrão do 0004/0006) ou, se for função do cliente com token ou checagem só de auth.uid(), revise o filtro e inclua a assinatura na lista desta guarda.', v_lista;
   end if;
 
   -- 5. O Realtime respeita a RLS só se ela estiver ligada na tabela publicada
@@ -141,7 +200,7 @@ begin
    where n.nspname = 'public' and c.relkind in ('r', 'p')
      and c.relname not in (select tabela from pg_temp.tabelas());
   if v_lista is not null then
-    raise warning 'Tabela(s) nova(s) no schema public sem teste de isolamento dedicado: %. Acrescente em pg_temp.tabelas() e nos dados de 0001_isolamento_staff.sql.', v_lista;
+    raise warning 'Tabela(s) nova(s) no schema public sem teste de isolamento dedicado: %. Acrescente em pg_temp.tabelas() e nos dados de _comum/dados.psql (valem para os testes 0001 a 0003).', v_lista;
   end if;
 end $$;
 
