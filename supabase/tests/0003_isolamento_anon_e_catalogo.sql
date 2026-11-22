@@ -12,14 +12,10 @@
 --      RLS filtra por is_staff. Objeto novo sem RLS, com grant aberto demais ou com política
 --      frouxa derruba o CI aqui.
 --
--- LACUNA CONHECIDA (não é falha deste teste, é aviso): o 0002_security.sql só revoga
--- INSERT, UPDATE e DELETE de authenticated; ele continua com TRUNCATE (que ignora a RLS e
--- esvaziaria as tabelas de todos os restaurantes), TRIGGER e REFERENCES nas 10 tabelas.
--- Pela API (PostgREST) ninguém dispara isso, mas quem conecta direto no SQL sim. A correção
--- é uma migration à parte: revoke truncate, references, trigger on all tables in schema
--- public from authenticated. Enquanto ela não existe, a guarda 3b só avisa, e SÓ no estado
--- legado exato (as 10 tabelas, os 3 privilégios, nada além). Com a migration aplicada, ou em
--- qualquer outro estado (tabela nova, privilégio em parte das tabelas), a guarda derruba o CI.
+-- A guarda 3b é estrita: o 0002_security.sql só revogava INSERT, UPDATE e DELETE de authenticated,
+-- que ficava com TRUNCATE (ignora a RLS e esvaziaria as tabelas de todos os restaurantes), TRIGGER
+-- e REFERENCES. A migration 0010 revogou os três (tabelas atuais e o padrão das futuras). Se
+-- qualquer um voltar, em qualquer tabela do public, a guarda derruba o CI.
 --
 -- Autocontido: cria os próprios dados e termina em rollback. Falha com raise exception.
 -- =====================================================================
@@ -138,11 +134,7 @@ begin
    where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
      and has_table_privilege('authenticated', c.oid, p);
   if v_lista is not null then
-    if pg_temp.truncate_legado() then
-      raise warning 'LACUNA CONHECIDA (ainda sem migration): o papel authenticated (staff) tem TRUNCATE, REFERENCES e TRIGGER nas 10 tabelas, e TRUNCATE ignora a RLS. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated.';
-    else
-      raise exception 'O papel authenticated (staff) tem TRUNCATE, REFERENCES ou TRIGGER em: %. Esses privilégios ignoram a RLS (TRUNCATE esvazia a tabela de todos os restaurantes). Faça revoke truncate, references, trigger ... from authenticated.', v_lista;
-    end if;
+    raise exception 'O papel authenticated (staff) tem TRUNCATE, REFERENCES ou TRIGGER em: %. Esses privilégios ignoram a RLS (TRUNCATE esvazia a tabela de todos os restaurantes). Faça revoke truncate, references, trigger ... from authenticated (padrão da migration 0010).', v_lista;
   end if;
 
   -- 3c. View, view materializada e tabela externa rodam com o poder do DONO e ignoram a RLS:

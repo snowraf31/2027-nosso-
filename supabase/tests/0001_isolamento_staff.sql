@@ -263,11 +263,10 @@ call pg_temp.checar_negados(pg_temp.id('b', 2, 1), 'bbbbbbbb', 'aaaaaaaa', 'o do
 -- ---------------------------------------------------------------------
 -- b) TRUNCATE: ignora a RLS e esvaziaria a tabela de TODOS os restaurantes
 -- ---------------------------------------------------------------------
--- O 0002 só revoga INSERT, UPDATE e DELETE de authenticated, então TRUNCATE (e REFERENCES e
--- TRIGGER) continua liberado nas 10 tabelas. Cada tentativa roda num sub-bloco que é desfeito
--- à força (P0777), para o teste não apagar nada de verdade. LACUNA CONHECIDA, sem migration ainda
--- (revoke truncate, references, trigger on all tables in schema public from authenticated):
--- no estado legado exato só avisa; com a migration aplicada, ou em qualquer outro estado, derruba o CI.
+-- O 0002 só revogava INSERT, UPDATE e DELETE de authenticated; a migration 0010 revogou TRUNCATE,
+-- REFERENCES e TRIGGER. Cada tentativa roda num sub-bloco que é desfeito à força (P0777), para o
+-- teste não apagar nada de verdade. Estrito: se o staff conseguir TRUNCATE em qualquer das 10
+-- tabelas, o CI cai.
 create procedure pg_temp.checar_truncate(p_usuario uuid, p_quem text)
 language plpgsql as $$
 declare
@@ -288,11 +287,7 @@ begin
   perform pg_temp.voltar_dono();
 
   if v_truncou <> '' then
-    if pg_temp.truncate_legado() then
-      raise warning 'LACUNA CONHECIDA (ainda sem migration): % consegue dar TRUNCATE (que ignora a RLS e esvazia a tabela de todos os restaurantes) em: %. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated.', p_quem, btrim(v_truncou);
-    else
-      raise exception 'FALHA DE SEGURANÇA: % consegue dar TRUNCATE (ignora a RLS e esvazia a tabela de todos os restaurantes) em: %', p_quem, btrim(v_truncou);
-    end if;
+    raise exception 'FALHA DE SEGURANÇA: % consegue dar TRUNCATE (ignora a RLS e esvazia a tabela de todos os restaurantes) em: %. Corrigir com: revoke truncate, references, trigger on all tables in schema public from authenticated (migration 0010).', p_quem, btrim(v_truncou);
   end if;
   -- o truncate de teste foi desfeito: os dados continuam lá
   if (select count(*) from public.orders where id::text like 'aaaaaaaa-%') <> 2 then
