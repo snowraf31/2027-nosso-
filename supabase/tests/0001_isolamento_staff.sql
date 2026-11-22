@@ -86,13 +86,19 @@ end $$;
 -- ---------------------------------------------------------------------
 -- c) Usuário logado sem staff não vê nada (nem o seed, nem A, nem B)
 -- ---------------------------------------------------------------------
-create procedure pg_temp.checar_vazio(p_usuario uuid, p_quem text)
+create procedure pg_temp.checar_vazio(p_usuario uuid, p_quem text, p_jwt_sem_chave_sub boolean default false)
 language plpgsql as $$
 declare
   t record;
   v_n bigint;
 begin
-  perform pg_temp.entrar_como(p_usuario);
+  if p_jwt_sem_chave_sub then
+    -- JWT "authenticated" que nem traz a chave "sub" (diferente de "sub": null)
+    perform set_config('request.jwt.claims', '{"role":"authenticated"}', true);
+    set local role authenticated;
+  else
+    perform pg_temp.entrar_como(p_usuario);
+  end if;
   for t in select * from pg_temp.tabelas() loop
     v_n := pg_temp.contar(t.tabela);
     if v_n <> 0 then
@@ -120,7 +126,8 @@ begin
 end $$;
 
 call pg_temp.checar_vazio('cccccccc-0002-0000-0000-000000000001', 'o usuário logado sem restaurante');
-call pg_temp.checar_vazio(null, 'um JWT "authenticated" sem sub');
+call pg_temp.checar_vazio(null, 'um JWT "authenticated" com sub nulo');
+call pg_temp.checar_vazio(null, 'um JWT "authenticated" sem a chave sub', true);
 
 -- ---------------------------------------------------------------------
 -- b) Escrita: staff de A não altera B (UPDATE só atinge o próprio restaurante)

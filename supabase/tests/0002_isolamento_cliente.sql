@@ -48,7 +48,14 @@ $$;
 do $$
 declare
   v jsonb;
+  v_slug_seed text;
 begin
+  -- slug de um restaurante que NÃO é de teste (vem do seed), lido antes de virar anon
+  select slug into v_slug_seed from public.restaurants
+   where id::text not like 'aaaaaaaa-%' and id::text not like 'bbbbbbbb-%' order by slug limit 1;
+  if v_slug_seed is null then
+    raise exception 'PREPARO DO TESTE: o seed não criou nenhum restaurante além dos de teste (esperado ao menos um)';
+  end if;
   perform pg_temp.entrar_anon();
 
   -- A com token de A: só categorias e itens de A
@@ -56,7 +63,7 @@ begin
   if v is null then
     raise exception 'get_guest_menu(A, mesa A1) devolveu null; deveria devolver o cardápio de A';
   end if;
-  if v->'restaurant'->>'slug' <> 'restaurante-a-teste' or v->'table'->>'label' <> 'Mesa A1' then
+  if v->'restaurant'->>'slug' is distinct from 'restaurante-a-teste' or v->'table'->>'label' is distinct from 'Mesa A1' then
     raise exception 'get_guest_menu(A, mesa A1) devolveu restaurante/mesa errados: %', v->'restaurant';
   end if;
   if jsonb_array_length(v->'categories') <> 2 or jsonb_array_length(v->'items') <> 2 then
@@ -86,7 +93,7 @@ begin
   if public.get_guest_menu('restaurante-a-teste', 'token-mesa-b1') is not null then
     raise exception 'VAZAMENTO: get_guest_menu com slug de A e token da mesa de B devolveu cardápio';
   end if;
-  if public.get_guest_menu('harbor-pine', 'token-mesa-a1') is not null then
+  if public.get_guest_menu(v_slug_seed, 'token-mesa-a1') is not null then
     raise exception 'VAZAMENTO: get_guest_menu com slug do restaurante do seed e token da mesa de A devolveu cardápio';
   end if;
 
@@ -123,7 +130,7 @@ begin
   if v is null then
     raise exception 'get_guest_order(pedido A1, token do pedido A1) devolveu null';
   end if;
-  if v->>'restaurant_name' <> 'Restaurante A (teste de isolamento)' or v->>'table_label' <> 'Mesa A1'
+  if v->>'restaurant_name' is distinct from 'Restaurante A (teste de isolamento)' or v->>'table_label' is distinct from 'Mesa A1'
      or jsonb_array_length(v->'items') <> 1 then
     raise exception 'get_guest_order(pedido A1) devolveu dados errados: %', v;
   end if;
@@ -133,7 +140,7 @@ begin
 
   -- O espelho em B
   v := public.get_guest_order(pg_temp.id('b', 8, 2), 'token-pedido-b2');
-  if v is null or v->>'restaurant_name' <> 'Restaurante B (teste de isolamento)'
+  if v is null or v->>'restaurant_name' is distinct from 'Restaurante B (teste de isolamento)'
      or pg_temp.ids_de_fora(v, 'bbbbbbbb') <> 0 then
     raise exception 'get_guest_order(pedido B2, token do pedido B2) devolveu dados errados: %', v;
   end if;
@@ -274,10 +281,10 @@ begin
   if v_pedido.table_id is distinct from pg_temp.id('a', 3, 1) then
     raise exception 'pedido da mesa A1 foi gravado na mesa %', v_pedido.table_id;
   end if;
-  if v_pedido.number <> 103 or (v_res->>'number')::int <> 103 then
+  if v_pedido.number is distinct from 103 or (v_res->>'number')::int is distinct from 103 then
     raise exception 'o primeiro pedido novo de A deveria ser o número 103 (sequência de A em 102) e foi %', v_pedido.number;
   end if;
-  if v_pedido.subtotal_cents <> 1150 or v_pedido.total_cents <> v_pedido.subtotal_cents + v_pedido.tax_cents then
+  if v_pedido.subtotal_cents is distinct from 1150 or v_pedido.total_cents is distinct from v_pedido.subtotal_cents + v_pedido.tax_cents then
     raise exception 'preço do pedido errado: subtotal % (esperado 1150), total %', v_pedido.subtotal_cents, v_pedido.total_cents;
   end if;
 
@@ -310,9 +317,9 @@ begin
   v_guest := public.get_guest_order(v_pedido.id, v_res->>'public_token');
   perform pg_temp.voltar_dono();
   -- (o pedido novo tem id aleatório, então a conferência é por nome, mesa, número e valor)
-  if v_guest is null or v_guest->>'restaurant_name' <> 'Restaurante A (teste de isolamento)'
-     or v_guest->>'table_label' <> 'Mesa A1' or (v_guest->>'number')::int <> 103
-     or (v_guest->>'subtotal_cents')::int <> 1150 or v_guest::text like '%bbbbbbbb-%' then
+  if v_guest is null or v_guest->>'restaurant_name' is distinct from 'Restaurante A (teste de isolamento)'
+     or v_guest->>'table_label' is distinct from 'Mesa A1' or (v_guest->>'number')::int is distinct from 103
+     or (v_guest->>'subtotal_cents')::int is distinct from 1150 or v_guest::text like '%bbbbbbbb-%' then
     raise exception 'get_guest_order do pedido novo de A devolveu null ou dados de outro restaurante: %', v_guest;
   end if;
 
@@ -323,7 +330,7 @@ begin
              jsonb_build_array(pg_temp.linha(pg_temp.id('b', 5, 2), 1)), 'counter', 0, null);
   perform pg_temp.voltar_dono();
   select * into v_pedido from public.orders where id = (v_res->>'id')::uuid;
-  if v_pedido.restaurant_id is distinct from pg_temp.id('b', 1, 1) or v_pedido.number <> 503 then
+  if v_pedido.restaurant_id is distinct from pg_temp.id('b', 1, 1) or v_pedido.number is distinct from 503 then
     raise exception 'o primeiro pedido novo de B deveria ser o número 503 no restaurante B e foi o % em %', v_pedido.number, v_pedido.restaurant_id;
   end if;
   if pg_temp.foto_fora('bbbbbbbb') <> v_fora_de_b then
