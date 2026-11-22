@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createPublicClient } from "@/lib/supabase/public";
+import { businessCode, businessMessage, isIdempotencyKeyConflict } from "./errors";
 
 /**
  * POST /api/orders — the guest's phone sends ids and quantities only.
@@ -23,18 +24,6 @@ const Body = z.object({
     .min(1)
     .max(40),
 });
-
-const MESSAGES: Record<string, string> = {
-  TABLE_NOT_FOUND: "This table code isn't active. Please ask a server for help.",
-  EMPTY_ORDER: "Your order is empty.",
-  TOO_MANY_ITEMS: "That's a big order! Please split it in two or ask a server.",
-  BAD_QUANTITY: "Please check the quantities in your order.",
-  ITEM_NOT_FOUND: "One of the items is no longer on the menu. Please refresh.",
-  ITEM_SOLD_OUT: "is sold out. Please remove it and try again.",
-  BAD_MODIFIER: "One of the options you picked is no longer available. Please refresh.",
-  MODIFIER_RULE: "needs a choice. Please edit that item.",
-  BAD_TIP: "Please check the tip amount.",
-};
 
 export async function POST(req: Request) {
   let json: unknown;
@@ -65,11 +54,11 @@ export async function POST(req: Request) {
   });
 
   if (error) {
-    const [code, detail] = (error.message || "").split(":");
-    const msg = MESSAGES[code];
-    if (msg) {
-      const text = detail ? `${detail.trim()} ${msg}` : msg;
-      return NextResponse.json({ error: text, code }, { status: 409 });
+    const code = businessCode(error);
+    if (code) {
+      // Só o código no log: a mensagem e o detalhe do Postgres trazem restaurant_id e a chave.
+      if (isIdempotencyKeyConflict(error)) console.warn("place_order: chave de idempotencia repetida", error.code);
+      return NextResponse.json({ error: businessMessage(error, code), code }, { status: 409 });
     }
     console.error("place_order failed", error);
     return NextResponse.json({ error: "We couldn't send your order. Please try again." }, { status: 500 });
