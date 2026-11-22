@@ -1,6 +1,4 @@
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
-
-type CookieToSet = { name: string; value: string; options: CookieOptions };
+import { createServerClient, type SetAllCookies } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
@@ -10,6 +8,18 @@ import { NextResponse, type NextRequest } from "next/server";
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });
 
+  // The library hands over the no-cache headers only on the first cookie write,
+  // but `response` is rebuilt on every write. Keep them here to reapply each time.
+  let cacheHeaders: Record<string, string> = {};
+
+  const setAll: SetAllCookies = (cookiesToSet, headers) => {
+    cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
+    response = NextResponse.next({ request });
+    cookiesToSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
+    cacheHeaders = { ...cacheHeaders, ...headers };
+    Object.entries(cacheHeaders).forEach(([key, value]) => response.headers.set(key, value));
+  };
+
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -18,11 +28,7 @@ export async function middleware(request: NextRequest) {
         getAll() {
           return request.cookies.getAll();
         },
-        setAll(cookiesToSet: CookieToSet[]) {
-          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
-          response = NextResponse.next({ request });
-          cookiesToSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
-        },
+        setAll,
       },
     }
   );
@@ -35,7 +41,12 @@ export async function middleware(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", request.nextUrl.pathname);
-    return NextResponse.redirect(url);
+    const redirect = NextResponse.redirect(url);
+    // A failed refresh may have rewritten or cleared the session cookies; the redirect
+    // must carry them (and the no-cache headers) or the browser keeps the stale ones.
+    response.cookies.getAll().forEach((cookie) => redirect.cookies.set(cookie));
+    Object.entries(cacheHeaders).forEach(([key, value]) => redirect.headers.set(key, value));
+    return redirect;
   }
 
   return response;
