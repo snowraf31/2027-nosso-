@@ -265,8 +265,11 @@ call pg_temp.checar_negados(pg_temp.id('b', 2, 1), 'bbbbbbbb', 'aaaaaaaa', 'o do
 -- ---------------------------------------------------------------------
 -- O 0002 só revogava INSERT, UPDATE e DELETE de authenticated; a migration 0010 revogou TRUNCATE,
 -- REFERENCES e TRIGGER. Cada tentativa roda num sub-bloco que é desfeito à força (P0777), para o
--- teste não apagar nada de verdade. Estrito: se o staff conseguir TRUNCATE em qualquer das 10
--- tabelas, o CI cai.
+-- teste não apagar nada de verdade. Estrito: se o staff conseguir dar TRUNCATE ... CASCADE numa das
+-- 10 tabelas, o CI cai. Atenção ao alcance: o cascade também exige TRUNCATE nas tabelas filhas,
+-- então o TRUNCATE concedido a UMA tabela só (por exemplo orders, que tem order_items como filha)
+-- ainda é barrado aqui. Quem pega o privilégio tabela por tabela é a guarda do catálogo
+-- (0003, item 3b), que olha has_table_privilege em cada uma.
 create procedure pg_temp.checar_truncate(p_usuario uuid, p_quem text)
 language plpgsql as $$
 declare
