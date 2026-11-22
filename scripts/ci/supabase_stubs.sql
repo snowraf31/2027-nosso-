@@ -1,4 +1,5 @@
--- Imita o mínimo do Supabase para aplicar as migrations num Postgres 16 puro.
+-- Imita o mínimo do Supabase para aplicar as migrations num Postgres 17 puro (a versão do
+-- Supabase real, usada no CI). O Postgres 16 também serve para rodar local.
 -- Só para CI e testes locais (scripts/ci/banco.sh). Nunca rode isto num banco do Supabase.
 
 create schema if not exists auth;

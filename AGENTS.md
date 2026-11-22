@@ -30,5 +30,5 @@ Regras completas: `docs/ai-agents/orquestracao.md`.
 
 ## Verificações
 - Política: `python3 scripts/ci/politica.py --base origin/main`
-- Banco: `bash scripts/ci/banco.sh` (precisa de um Postgres 16 limpo; variáveis `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`)
+- Banco: `bash scripts/ci/banco.sh` (precisa de um Postgres 17 limpo, igual ao Supabase real e ao CI; o 16 também serve para rodar local; variáveis `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`)
 - App: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build` (os que existirem)

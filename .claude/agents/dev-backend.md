@@ -29,7 +29,7 @@ Arquivos de outras áreas você não edita; se a tarefa pedir, descreva ao maest
 
 ## Testes
 - Testes do banco ficam em `supabase/tests/*.sql` e rodam depois das migrations e dos seeds (`scripts/ci/banco.sh`). Um teste falha com `raise exception`.
-- Para rodar local: um Postgres 16 limpo e `PGHOST=... PGUSER=... bash scripts/ci/banco.sh`.
+- Para rodar local: um Postgres 17 limpo (igual ao Supabase real e ao CI; o 16 também serve) e `PGHOST=... PGUSER=... bash scripts/ci/banco.sh`.
 
 ## Como trabalhar
 1. Trabalhe só na worktree que o maestro indicar (caminho em `.claude/worktrees/<nome>`). Nunca edite o checkout principal.
