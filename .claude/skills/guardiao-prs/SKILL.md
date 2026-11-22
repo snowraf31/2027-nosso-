@@ -2,7 +2,6 @@
 name: guardiao-prs
 description: Guardião dos PRs do Tabletop. Acompanha os PRs abertos, junta os aprovados num trem de merge (um PR só, um CI só), faz a pré-checagem local e faz o merge com merge commit quando o ci-ok fica verde e o usuário autorizou por escrito. Use com /guardiao-prs ou quando o maestro tiver dois ou mais PRs aprovados.
 argument-hint: "[números dos PRs, ou vazio para todos os aprovados]"
-disable-model-invocation: true
 ---
 
 # /guardiao-prs
@@ -22,15 +21,17 @@ Classifique cada PR:
 
 Para o label de migration, confira quem colocou: só vale se foi o dono do repositório.
 ```bash
-gh api repos/snowraf31/2027-nosso-/issues/<n>/events --jq '.[] | select(.event=="labeled" and .label.name=="migracao-aprovada") | .actor.login'
+gh api --paginate repos/snowraf31/2027-nosso-/issues/<n>/events --jq '.[] | select(.event=="labeled" and .label.name=="migracao-aprovada") | .actor.login'
 ```
+Vale o último evento `labeled` e o label precisa continuar no PR.
 
 ## 2. Um PR só: caminho simples
 ```bash
 gh pr ready <n>
+gh run list --workflow CI --commit <sha-da-ponta> --json status,conclusion   # espere a rodada do ready_for_review
 gh pr checks <n> --watch --required
 ```
-Com `ci-ok` verde e autorização escrita do usuário: `gh pr merge <n> --merge --delete-branch`.
+`ci-ok` pulado (do tempo de rascunho) não conta como verde: só vale a rodada da ponta atual. Com `ci-ok` verde e autorização escrita do usuário: `gh pr merge <n> --merge --delete-branch --match-head-commit <sha-da-ponta>`.
 
 ## 3. Dois ou mais: montar o trem
 1. Crie o trem a partir de `origin/main`, numa worktree própria:
@@ -57,10 +58,10 @@ Com `ci-ok` verde e autorização escrita do usuário: `gh pr merge <n> --merge 
    ```
    No corpo, liste cada PR incluído com o título e o resultado do revisor.
 5. Acompanhe o check obrigatório: `gh pr checks <trem> --watch --required`.
-   - Vermelho: descubra o job e a branch culpada, tire-a do trem ou peça a correção à sessão dona, monte de novo e repita a pré-checagem. Nunca "re-run failed jobs".
+   - Vermelho: descubra o job e a branch culpada, tire-a do trem ou peça a correção à sessão dona. **A correção volta ao `revisor`**, que revisa o diff desde o SHA aprovado (registrado no corpo do PR); só com `APROVADO` a branch é enviada de novo e o trem é remontado, com nova pré-checagem. Nunca "re-run failed jobs".
 6. Verde: avise o usuário e espere a autorização escrita. Com ela:
    ```bash
-   gh pr merge <trem> --merge --delete-branch
+   gh pr merge <trem> --merge --delete-branch --match-head-commit <sha-da-ponta>
    ```
    Sempre `--merge` (merge commit), nunca squash ou rebase, para o GitHub fechar cada PR incluído como mergeado.
 7. Confira que os PRs incluídos aparecem como "Merged". Se algum ficou aberto, avise.

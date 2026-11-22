@@ -30,6 +30,7 @@ SEGREDOS = [
     ("chave da AWS", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("chave da Anthropic", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}")),
     ("chave privada", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("URL do Postgres com senha", re.compile(r"postgres(ql)?://[^:/\s]+:[^@\s]+@")),
 ]
 
 erros = []
@@ -41,7 +42,9 @@ def git(*args):
 
 def checar_migrations(base):
     try:
-        mudancas = git("diff", "--name-status", "-M", base, "HEAD", "--", MIGRATIONS)
+        # Compara a partir do ancestral comum: o que o main ganhou depois não conta como mudança da branch.
+        mb = git("merge-base", base, "HEAD").strip()
+        mudancas = git("diff", "--name-status", "-M", mb, "HEAD", "--", MIGRATIONS)
     except subprocess.CalledProcessError as e:
         erros.append(f"não foi possível comparar com a base {base!r}: {e.stderr.strip()}")
         return

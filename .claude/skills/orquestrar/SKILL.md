@@ -50,9 +50,10 @@ Quando uma sessão terminar:
    gh pr create --draft --base main --head <branch> --title "<título>" --body "<o que muda, aceite, verificações, aprovado pelo revisor>"
    ```
 5. Avise o usuário: PR aberto, resultado da revisão.
+6. Qualquer correção depois do primeiro push volta ao `revisor` (diff desde o SHA aprovado) antes de ser enviada.
 
 ## 5. Entregar
-- Dois ou mais PRs aprovados: rode `/guardiao-prs` para montar o trem.
+- Dois ou mais PRs aprovados: use a skill `guardiao-prs` para montar o trem.
 - Um PR sozinho: siga o caminho simples do guardião (tirar do rascunho, CI, merge com autorização).
 - Merge só com a autorização escrita do usuário. Migrations e atualizações major ficam de fora do merge automático.
 

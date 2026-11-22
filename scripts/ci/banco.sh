@@ -7,10 +7,12 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 DB="${BANCO_TESTE:-tabletop_ci}"
 
+# Só roda contra Postgres local ou do CI: nunca contra o banco do restaurante.
+[[ "$DB" =~ ^[a-z_][a-z0-9_]*$ ]] || { echo "Recusado: BANCO_TESTE inválido." >&2; exit 2; }
+[ -z "${PGHOSTADDR:-}" ] && [ -z "${PGSERVICE:-}" ] || { echo "Recusado: PGHOSTADDR/PGSERVICE não são aceitos." >&2; exit 2; }
 case "${PGHOST:-localhost}" in
-  *supabase.co*|*supabase.com*|*pooler.supabase*)
-    echo "Recusado: PGHOST aponta para o Supabase. Use um Postgres local ou do CI." >&2
-    exit 2 ;;
+  localhost|127.0.0.1|::1|/*) ;;
+  *) echo "Recusado: PGHOST precisa ser localhost ou socket local." >&2; exit 2 ;;
 esac
 
 psql -v ON_ERROR_STOP=1 -q -d postgres -c "drop database if exists \"$DB\"" -c "create database \"$DB\""
@@ -22,7 +24,9 @@ rodar() {
 
 rodar scripts/ci/supabase_stubs.sql
 for f in supabase/migrations/*.sql; do rodar "$f"; done
-for f in supabase/seed.sql supabase/seed_experience.sql supabase/seed_blogs.sql; do
+# Seeds: seed.sql primeiro, depois os outros seed_*.sql em ordem alfabética.
+if [ -f supabase/seed.sql ]; then rodar supabase/seed.sql; fi
+for f in supabase/seed_*.sql; do
   if [ -f "$f" ]; then rodar "$f"; fi
 done
 

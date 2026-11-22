@@ -40,10 +40,11 @@ jobs:
           files="$(git diff --name-only "$BASE_SHA" HEAD)"
           echo "$files"
           tudo=false
-          echo "$files" | grep -qE '^(\.github/workflows/|scripts/ci/)' && tudo=true
+          grep -qE '^(\.github/workflows/|scripts/ci/)' <<<"$files" && tudo=true
           app=$tudo; banco=$tudo
-          echo "$files" | grep -qE '^(app/|components/|lib/|public/|middleware\.ts$|next\.config\.ts$|tsconfig\.json$|package(-lock)?\.json$)' && app=true
-          echo "$files" | grep -qE '^supabase/' && banco=true
+          # App roda se algum arquivo estiver fora de supabase/, docs/, .claude/, *.md e dependabot.
+          grep -vqE '^(supabase/|docs/|\.claude/|\.github/dependabot\.yml$|.*\.md$)' <<<"$files" && app=true
+          grep -qE '^supabase/' <<<"$files" && banco=true
           echo "app=$app" >> "$GITHUB_OUTPUT"
           echo "banco=$banco" >> "$GITHUB_OUTPUT"
 

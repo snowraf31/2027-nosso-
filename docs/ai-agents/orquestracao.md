@@ -28,7 +28,7 @@ Cada arquivo tem um dono só. Duas sessões nunca editam o mesmo arquivo ao mesm
 | `app/kitchen/**` | `dev-cozinha` |
 | `app/login/**`, `app/admin/**`, `components/painel/**`, `lib/painel/**` | `dev-painel` |
 | `supabase/**`, `app/api/**`, `middleware.ts`, `lib/supabase/**`, `lib/types.ts` | `dev-backend` |
-| `.github/**`, `scripts/ci/**`, `package.json`, `package-lock.json`, `next.config.ts`, `tsconfig.json`, `.claude/**`, `docs/ai-agents/**`, `AGENTS.md`, `CLAUDE.md` | `plataforma-ci` |
+| `.github/**`, `scripts/ci/**`, `.gitignore`, `.env.example`, `package.json`, `package-lock.json`, `next.config.ts`, `tsconfig.json`, `.claude/**`, `docs/ai-agents/**`, `AGENTS.md`, `CLAUDE.md` | `plataforma-ci` |
 | `docs/projeto/**`, `docs/prototipos/**`, `docs/planilhas-estoque/**`, `README.md` | maestro |
 
 Migrations: só o `dev-backend` cria, e o maestro define o número da próxima (`NNNN_nome.sql`) antes de abrir a sessão, para duas branches nunca usarem o mesmo.
@@ -49,7 +49,8 @@ Nunca editar o checkout principal. Nomes de branch: `<area>/<assunto>` (por exem
 1. A sessão termina com commit local e avisa o maestro (relatório com branch, commits, arquivos e verificações).
 2. O maestro chama o `revisor` sobre a branch local.
 3. Se vier `BLOQUEIOS`, a mesma sessão corrige e o revisor revisa de novo.
-4. Só com `APROVADO` sai **um push único** e o PR (em rascunho). Assim cada PR roda o CI uma vez só.
+4. Só com `APROVADO` sai **um push único** e o PR (em rascunho), com o SHA aprovado no corpo. Assim cada PR roda o CI uma vez só.
+5. Toda correção depois do primeiro push (inclusive por CI vermelho no trem) volta ao `revisor`, que revisa o diff desde o SHA aprovado. Nada vai ao GitHub sem `APROVADO`.
 
 ### 3.3 Trem de merge
 - PRs individuais ficam em **rascunho**, onde o CI não roda.
@@ -102,7 +103,7 @@ Commits pequenos, mensagem em português. As linhas `Co-Authored-By` do Claude f
   - `politica`: sempre roda;
   - `app`: instalação, typecheck, lint, testes e build, só quando o app mudou;
   - `banco`: aplica as migrations e os seeds num Postgres 16 limpo e roda `supabase/tests/*.sql`, só quando `supabase/` mudou;
-  - `ci-ok`: o único check obrigatório; passa só se os outros passaram ou foram pulados por não terem mudança.
+  - `ci-ok`: o único check obrigatório; passa só se os outros passaram ou foram pulados por não terem mudança. Em rascunho ele aparece como pulado, o que não conta como verde: vale a rodada da ponta atual do PR.
 - Mudança no próprio workflow ou em `scripts/ci/` roda tudo.
 
 ## 5. Publicação
